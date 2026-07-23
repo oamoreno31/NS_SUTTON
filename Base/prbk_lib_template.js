@@ -82,7 +82,7 @@ define([
     const getMetadata = () => ({
         id: 'TEMPLATE',
         name: 'Template Report',
-        description: 'Plantilla base. Reemplazar este texto con la descripción real del reporte.',
+        description: 'Base template. Replace this text with the report\'s real description.',
         formats: ['PDF']   // o ['EXCEL'], ['CSV'], ['HTML'], etc.
     });
 
@@ -208,7 +208,7 @@ define([
                 th { background: #eee; }
             </style></head><body>
             <h2>Template Report</h2>
-            <p>Esta es la salida placeholder de la plantilla. Reemplazar la implementación de <code>generate()</code>.</p>
+            <p>This is the template's placeholder output. Replace the <code>generate()</code> implementation.</p>
             <table><tr><th>Filter</th><th>Value</th></tr>${rows}</table>
             </body></html>
         `;

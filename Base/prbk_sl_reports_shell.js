@@ -4,22 +4,15 @@
  *
  * SUITELET SHELL — Cascarón dinámico para reportes del Preebook.
  *
- * Arquitectura plugin/registry:
- *   - Este Suitelet NO contiene lógica de reportes. Es 100% agnóstico.
- *   - El catálogo de reportes vive en el registro custom `customrecord_sgp_rpt_registry`.
- *     Cada renglón del registro apunta a una librería SuiteScript (campo libpath) que
- *     implementa el contrato { getMetadata, getFilterDefinitions, generate }.
- *   - El shell:
- *       1. Lee el catálogo de reportes activos del registro.
- *       2. Pinta un dropdown "Report" — y nada más, hasta que el usuario elija.
- *       3. Cuando el usuario elige reporte, refresca el form vía POST y pinta
- *          dinámicamente los filtros declarados por la librería.
- *       4. Cuando el usuario hace clic en "Generate Report", llama a lib.generate(filterValues)
- *          y entrega el resultado (PDF inline, Excel/CSV download, o HTML inline).
+ * Arquitectura plugin/registry: este Suitelet NO contiene lógica de reportes.
+ * El catálogo vive en `customrecord_sgp_rpt_registry`; cada renglón apunta a
+ * una librería (campo libpath) que implementa { getMetadata,
+ * getFilterDefinitions, generate, getPreviewData? }. El shell lee el
+ * catálogo, pinta el dropdown "Report", pinta los filtros de la librería
+ * elegida, y al enviar llama a lib.generate(filterValues).
  *
- * Para agregar un nuevo reporte: crear su librería (ver prbk_lib_template.js) +
- * crear un registro nuevo en customrecord_sgp_rpt_registry apuntando a esa librería.
- * No requiere tocar este Suitelet.
+ * Nuevo reporte: crear su librería (ver prbk_lib_template.js) + un registro
+ * en customrecord_sgp_rpt_registry. No requiere tocar este Suitelet.
  */
 define([
     'N/log',
@@ -45,18 +38,16 @@ define([
 
     // IDs de campos internos del form
     const FLD_REPORT = 'custpage_report';
-    const FLD_ACTION = 'custpage_action';        // 'load_filters' | 'generate'
+    const FLD_ACTION = 'custpage_action';        // 'load_filters' | 'preview' | 'generate'
     const FLD_FILTER_PREFIX = 'custpage_f_';     // prefijo para campos de filtros dinámicos
 
     const ACTION_LOAD_FILTERS = 'load_filters';
     const ACTION_GENERATE     = 'generate';
-    const ACTION_PREVIEW      = 'preview';   // pantalla de previsualización (nueva)
+    const ACTION_PREVIEW      = 'preview';
 
-    // Convención: cualquier filtro marcado `previewChoice: true` en
-    // getFilterDefinitions() (típicamente el select de formato Excel/PDF) NO se
-    // pinta en el form de filtros cuando la librería soporta preview — se elige
-    // desde los botones Download Excel/PDF de la pantalla de previsualización.
-    // Ver renderLibrarySection / buildPreviewFragment.
+    // Convención: filtros con `previewChoice: true` (ej. formato Excel/PDF) NO
+    // se pintan en el form cuando la librería soporta preview — se eligen desde
+    // los botones Download Excel/PDF del preview. Ver renderLibrarySection/buildPreviewFragment.
 
     // -----------------------------------------------------------------------
     // Entry point
@@ -69,8 +60,8 @@ define([
 
             if (!reports.length) {
                 ctx.response.write(htmlError(
-                    'No hay reportes configurados',
-                    `Crea al menos un renglón en el registro <b>${REGISTRY_RECORD}</b> con un <b>${REGISTRY_FIELDS.LIBPATH}</b> válido.`
+                    'No reports configured',
+                    `Create at least one row in the <b>${REGISTRY_RECORD}</b> registry with a valid <b>${REGISTRY_FIELDS.LIBPATH}</b>.`
                 ));
                 return;
             }
@@ -85,12 +76,11 @@ define([
                 return;
             }
 
-            // Localizar la entrada del registro
             const entry = reports.find((r) => r.code === selectedReportCode);
             if (!entry) {
                 ctx.response.write(htmlError(
-                    `Reporte '${selectedReportCode}' no encontrado`,
-                    'Es posible que se haya inactivado. Vuelve a la página principal del Suitelet.'
+                    `Report '${selectedReportCode}' not found`,
+                    'It may have been deactivated. Go back to the Suitelet main page.'
                 ));
                 return;
             }
@@ -105,27 +95,26 @@ define([
                     } else if (ctx.request.method === 'POST' && action === ACTION_PREVIEW) {
                         handlePreview(ctx, reports, lib, entry, params);
                     } else {
-                        // Default: mostrar form con filtros del reporte seleccionado
                         renderForm(ctx, reports, entry, lib, params);
                     }
                 } catch (innerEx) {
                     log.error('shell.libraryRun', `${entry.code}: ${innerEx.name} ${innerEx.message}\n${innerEx.stack || ''}`);
                     ctx.response.write(htmlError(
-                        `Error en librería ${entry.code}`,
+                        `Error in library ${entry.code}`,
                         `${innerEx.name}: ${escapeHtml(innerEx.message)}`
                     ));
                 }
             }, (loadErr) => {
                 log.error('shell.libraryLoad', `No se pudo cargar ${entry.libpath}: ${loadErr && loadErr.message}`);
                 ctx.response.write(htmlError(
-                    `No se pudo cargar la librería '${entry.libpath}'`,
-                    'Verifica que la ruta sea correcta (sin extensión .js) y que el archivo exista en el File Cabinet.'
+                    `Could not load library '${entry.libpath}'`,
+                    'Check that the path is correct (no .js extension) and that the file exists in the File Cabinet.'
                 ));
             });
 
         } catch (ex) {
             log.error('shell.onRequest', `${ex.name} ${ex.message}\n${ex.stack || ''}`);
-            ctx.response.write(htmlError('Error inesperado en el shell', `${ex.name}: ${escapeHtml(ex.message)}`));
+            ctx.response.write(htmlError('Unexpected error in the shell', `${ex.name}: ${escapeHtml(ex.message)}`));
         }
     };
 
@@ -198,11 +187,9 @@ define([
     const renderForm = (ctx, reports, entry, lib, params, extra) => {
         const form = serverWidget.createForm({ title: 'Preebook Reports' });
 
-        // Client script asociado: dispara refresh server-side cuando cambia
-        // el dropdown de reporte (ver prbk_cs_reports_shell.js).
+        // Client script: refresh server-side al cambiar el dropdown de reporte.
         form.clientScriptModulePath = './prbk_cs_reports_shell.js';
 
-        // Dropdown principal de selección de reporte
         const reportField = form.addField({
             id: FLD_REPORT,
             type: serverWidget.FieldType.SELECT,
@@ -218,12 +205,10 @@ define([
             });
         if (entry) reportField.defaultValue = entry.code;
 
-        // Si la librería implementa getPreviewData(), el flujo pasa primero por
-        // la pantalla de previsualización (nueva); si no, se mantiene el flujo
-        // directo a generate() de siempre (compatibilidad hacia atrás).
+        // Si la librería implementa getPreviewData(), el flujo pasa por la
+        // pantalla de preview; si no, va directo a generate() (compatibilidad).
         const previewSupported = !!(lib && typeof lib.getPreviewData === 'function');
 
-        // Campo oculto que indica la acción a ejecutar (load_filters | preview | generate)
         const actionField = form.addField({
             id: FLD_ACTION,
             type: serverWidget.FieldType.TEXT,
@@ -236,7 +221,6 @@ define([
 
         const showingPreview = !!(extra && extra.previewHtml);
 
-        // Si ya hay reporte seleccionado, renderizar su sección de filtros
         if (entry && lib) {
             renderLibrarySection(form, entry, lib, params, previewSupported);
             form.addSubmitButton({
@@ -246,15 +230,10 @@ define([
             form.addSubmitButton({ label: 'Continue' });
         }
 
-        // Nota: la lógica de "auto-refresh al cambiar el dropdown de reporte"
-        // vive en el Client Script asociado (prbk_cs_reports_shell.js), enlazado
-        // arriba vía form.clientScriptModulePath.
-
-        // Preview embebido: campo INLINEHTML con la tabla del reporte (misma
-        // estructura que el Excel), pintado dentro de la MISMA página de NetSuite
-        // — no navega a una página aparte. Los botones Download Excel/PDF dentro
-        // de este fragmento reusan el form nativo (custpage_action=generate +
-        // custpage_f_<formatFilterId>=EXCEL|PDF) vía JS, sin crear un <form> anidado.
+        // Preview embebido: INLINEHTML con la tabla del reporte, pintado dentro
+        // de la MISMA página de NetSuite. Los botones Download reusan el form
+        // nativo (custpage_action=generate + custpage_f_<id>=EXCEL|PDF) vía JS,
+        // sin <form> anidado.
         if (showingPreview) {
             const previewFld = form.addField({
                 id: 'custpage_preview_html',
@@ -267,14 +246,11 @@ define([
         ctx.response.writePage(form);
     };
 
-    /**
-     * Pinta la sección específica del reporte: cabecera con descripción + filtros declarados.
-     */
+    /** Pinta la sección del reporte: cabecera con descripción + filtros declarados. */
     const renderLibrarySection = (form, entry, lib, params, previewSupported) => {
         const meta = safeCall(() => lib.getMetadata(), {});
         const filters = safeCall(() => lib.getFilterDefinitions(), []) || [];
 
-        // Cabecera con descripción / metadata
         const headerHtml = buildHeaderHtml(entry, meta);
         const headerFld = form.addField({
             id: 'custpage_header',
@@ -283,20 +259,17 @@ define([
         });
         headerFld.defaultValue = headerHtml;
 
-        // Filtros visibles en el form: si la librería soporta preview, los marcados
-        // `previewChoice` (ej. el formato Excel/PDF) se ocultan aquí — se eligen
-        // desde los botones de descarga de la pantalla de previsualización.
+        // Si soporta preview, los filtros `previewChoice` (ej. formato) se
+        // ocultan aquí — se eligen desde los botones de descarga del preview.
         const visibleFilters = previewSupported
             ? filters.filter((def) => !def.previewChoice)
             : filters;
 
-        // Group "Filters" para los filtros dinámicos
         if (visibleFilters.length) {
             form.addFieldGroup({ id: 'custpage_fg_filters', label: 'Filters' });
             visibleFilters.forEach((def) => {
                 const fld = addDynamicField(form, def);
                 if (!fld) return;
-                // Si vino del POST anterior, conservar el valor
                 const submittedKey = FLD_FILTER_PREFIX + def.id;
                 const submittedVal = params[submittedKey];
                 if (submittedVal !== undefined && submittedVal !== '') {
@@ -314,11 +287,9 @@ define([
             noFiltersFld.defaultValue = '<p style="color:#666;margin:8px 0;">This report has no filters.</p>';
         }
 
-        // Campos ocultos (no INLINE, sino HIDDEN de verdad) para los filtros
-        // previewChoice (ej. output_format). Quedan fuera de la vista pero SÍ
-        // forman parte de `document.forms['main_form']`, para que los botones
-        // Download Excel/PDF del preview embebido puedan setear su valor por JS
-        // justo antes de enviar el form (ver buildPreviewFragment).
+        // Campos HIDDEN reales (no INLINE) para los filtros previewChoice (ej.
+        // output_format): fuera de la vista pero parte de main_form, para que
+        // los botones Download del preview los seteen por JS antes de enviar.
         if (previewSupported) {
             filters.filter((def) => def.previewChoice).forEach((def) => {
                 const fieldId = FLD_FILTER_PREFIX + def.id;
@@ -332,16 +303,13 @@ define([
                 hiddenFld.defaultValue = (submittedVal !== undefined && submittedVal !== '')
                     ? submittedVal
                     : (def.defaultValue || '');
-                // Nota: nunca isMandatory=true acá — se llena por JS al hacer clic
-                // en Download Excel/PDF, no por entrada directa del usuario. La
-                // validación real sigue ocurriendo server-side en handleGenerate().
+                // Nunca isMandatory=true acá: se llena por JS al hacer clic en
+                // Download. Validación real sigue en handleGenerate().
             });
         }
     };
 
-    /**
-     * Convierte una definición de filtro de la librería en un campo de form de NetSuite.
-     */
+    /** Convierte una definición de filtro de la librería en un campo de form de NetSuite. */
     const addDynamicField = (form, def) => {
         if (!def || !def.id) return null;
 
@@ -374,16 +342,13 @@ define([
             label: label,
             container: 'custpage_fg_filters'
         };
-        // Para SELECT/MULTISELECT con source de registro o lista nativa
         if ((type === 'select' || type === 'multiselect') && def.source) {
             fieldOpts.source = def.source;
         }
 
         const fld = form.addField(fieldOpts);
 
-        // Opciones inline (no source) para SELECT/MULTISELECT
         if ((type === 'select' || type === 'multiselect') && Array.isArray(def.options)) {
-            // Para SELECT siempre agregar opción vacía al inicio si no es mandatory
             if (type === 'select' && !def.mandatory) {
                 fld.addSelectOption({ value: '', text: def.placeholder || '-- Select --' });
             }
@@ -415,30 +380,27 @@ define([
     const handleGenerate = (ctx, lib, entry, params) => {
         const filters = safeCall(() => lib.getFilterDefinitions(), []) || [];
 
-        // Construir mapa de valores de filtros (id -> value)
         const filterValues = {};
         filters.forEach((def) => {
             const submitted = params[FLD_FILTER_PREFIX + def.id];
             filterValues[def.id] = submitted == null ? '' : submitted;
         });
 
-        // Validar obligatorios
         const missing = filters
             .filter((def) => def.mandatory && (filterValues[def.id] === '' || filterValues[def.id] == null))
             .map((def) => def.label || def.id);
         if (missing.length) {
             ctx.response.write(htmlError(
-                `Faltan filtros obligatorios`,
-                `Por favor proporciona: ${missing.map(escapeHtml).join(', ')}`
+                `Missing required filters`,
+                `Please provide: ${missing.map(escapeHtml).join(', ')}`
             ));
             return;
         }
 
-        // Validación opcional por la librería
         if (typeof lib.validateFilters === 'function') {
             const result = safeCall(() => lib.validateFilters(filterValues), null);
             if (result && result.valid === false) {
-                ctx.response.write(htmlError('Filtros inválidos', escapeHtml(result.message || '')));
+                ctx.response.write(htmlError('Invalid filters', escapeHtml(result.message || '')));
                 return;
             }
         }
@@ -447,11 +409,10 @@ define([
 
         const output = lib.generate(filterValues);
         if (!output) {
-            ctx.response.write(htmlError(`El reporte ${entry.code} no retornó nada`, ''));
+            ctx.response.write(htmlError(`Report ${entry.code} returned nothing`, ''));
             return;
         }
 
-        // Entrega según contentType
         const contentType = String(output.contentType || '').toUpperCase();
 
         if (output.fileObj) {
@@ -468,41 +429,36 @@ define([
         }
 
         ctx.response.write(htmlError(
-            `El reporte ${entry.code} retornó una salida no reconocida`,
-            'Esperaba { fileObj } o { html }.'
+            `Report ${entry.code} returned an unrecognized output`,
+            'Expected { fileObj } or { html }.'
         ));
     };
 
     // -----------------------------------------------------------------------
-    // Preview handler — arma la data de previsualización y delega en renderForm()
-    // para que se pinte EMBEBIDA dentro de la misma página de NetSuite (no navega
-    // a una página aparte). Solo se invoca si la librería implementa
-    // getPreviewData(). No genera ningún archivo: eso lo sigue haciendo
-    // handleGenerate(), sin cambios, cuando el usuario hace clic en Download
-    // Excel/PDF dentro del preview embebido.
+    // Preview handler — arma la data y delega en renderForm() para que se
+    // pinte EMBEBIDA en la misma página. Solo si la librería implementa
+    // getPreviewData(); no genera archivo (eso sigue en handleGenerate()).
     // -----------------------------------------------------------------------
 
     const handlePreview = (ctx, reports, lib, entry, params) => {
         const filters = safeCall(() => lib.getFilterDefinitions(), []) || [];
 
-        // Construir mapa de valores de filtros (id -> value). Los campos marcados
-        // previewChoice (típicamente el formato Excel/PDF) no se piden acá: se
-        // eligen en los botones de descarga del preview embebido.
+        // Los filtros previewChoice (ej. formato) no se piden acá: se eligen
+        // en los botones de descarga del preview embebido.
         const filterValues = {};
         filters.forEach((def) => {
             const submitted = params[FLD_FILTER_PREFIX + def.id];
             filterValues[def.id] = submitted == null ? '' : submitted;
         });
 
-        // Validar obligatorios, excluyendo los previewChoice (todavía no aplican).
         const missing = filters
             .filter((def) => def.mandatory && !def.previewChoice &&
                 (filterValues[def.id] === '' || filterValues[def.id] == null))
             .map((def) => def.label || def.id);
         if (missing.length) {
             ctx.response.write(htmlError(
-                `Faltan filtros obligatorios`,
-                `Por favor proporciona: ${missing.map(escapeHtml).join(', ')}`
+                `Missing required filters`,
+                `Please provide: ${missing.map(escapeHtml).join(', ')}`
             ));
             return;
         }
@@ -512,8 +468,8 @@ define([
         const previewData = safeCall(() => lib.getPreviewData(filterValues), null);
         if (!previewData || !Array.isArray(previewData.headers)) {
             ctx.response.write(htmlError(
-                `This report ${entry.code} do not return any preview data`,
-                'Please check script logs. getPreviewData() it must return at least { headers: [...], rows: [...] }.'
+                `Report ${entry.code} did not return preview data`,
+                'Check the script log. getPreviewData() must return at least { headers: [...], rows: [...] }.'
             ));
             return;
         }
@@ -522,24 +478,20 @@ define([
         const meta = safeCall(() => lib.getMetadata(), {});
         const previewHtml = buildPreviewFragment(entry, meta, filters, filterValues, previewData);
 
-        // Repinta el MISMO form (dropdown + filtros) y le agrega el fragmento de
-        // preview como campo INLINEHTML — todo dentro de la página de NetSuite.
+        // Repinta el MISMO form y agrega el fragmento de preview como INLINEHTML.
         renderForm(ctx, reports, entry, lib, params, { previewHtml });
     };
 
-    // Cuántas filas "padre" se muestran por página (las sub-filas de receta que
-    // cuelgan de un padre viajan con él y NO cuentan para este límite).
+    // Filas "padre" por página (sub-filas de receta viajan con su padre, no cuentan).
     const PREVIEW_PAGE_SIZE = 10;
 
-    // A partir de cuántas recetas se colapsan las sub-filas adicionales detrás
-    // de un toggle "Ver todas las recetas" (ver buildPreviewFragment).
+    // A partir de cuántas recetas se colapsan las sub-filas detrás de un toggle.
     const PREVIEW_COLLAPSE_THRESHOLD = 5;
 
     /**
      * Normaliza una entrada de previewData.rows a { cells, subRows, recipeCount }.
-     * Soporta tanto el formato plano Array<string> (reportes sin sub-filas, ej. R2)
-     * como el formato jerárquico { cells, subRows, recipeCount } (reportes con
-     * sub-filas por receta, ej. R1 — ver buildHardgoodsPreviewRows en su librería).
+     * Soporta el formato plano Array<string> (sin sub-filas, ej. R2) y el
+     * jerárquico { cells, subRows, recipeCount } (con sub-filas, ej. R1).
      */
     const normalizePreviewRow = (row) => {
         if (Array.isArray(row)) return { cells: row, subRows: [], recipeCount: null };
@@ -554,24 +506,18 @@ define([
     };
 
     /**
-     * Construye el fragmento HTML embebido (campo INLINEHTML) con la previsualización:
-     * misma estructura de columnas/filas que el Excel (ver getPreviewData() de cada
-     * librería), con:
-     *   - Paginación de a PREVIEW_PAGE_SIZE filas "padre" (data-page en cada <tr>).
-     *   - Collapse de sub-filas de receta cuando recipeCount > PREVIEW_COLLAPSE_THRESHOLD,
-     *     detrás de un toggle "Ver todas las recetas".
-     *   - Botones Download Excel/PDF que reusan el form NATIVO de NetSuite
-     *     (custpage_action=generate + custpage_f_<id>=EXCEL|PDF vía JS + submit),
-     *     sin crear un <form> anidado — ver window.pbDownload en el <script>.
-     * Todo el CSS/IDs están namespaced bajo #pb-preview-root para no chocar con
-     * el resto de la página de NetSuite.
+     * Construye el fragmento HTML embebido (INLINEHTML) del preview: misma
+     * estructura de columnas que el Excel, con paginación (PREVIEW_PAGE_SIZE),
+     * collapse de sub-filas (PREVIEW_COLLAPSE_THRESHOLD), y botones Download
+     * que reusan el form nativo de NetSuite (ver window.pbDownload). Todo el
+     * CSS/IDs va namespaced bajo #pb-preview-root.
      */
     const buildPreviewFragment = (entry, meta, filters, filterValues, previewData) => {
         const formatDef = filters.find((def) => def.previewChoice) || null;
         const formatFieldId = formatDef ? (FLD_FILTER_PREFIX + formatDef.id) : '';
 
-        // Un botón de descarga por cada opción del filtro previewChoice (EXCEL/PDF),
-        // acotado a los formatos que la librería declara soportar (getMetadata().formats).
+        // Un botón por opción del filtro previewChoice, acotado a los formatos
+        // que la librería declara soportar (getMetadata().formats).
         const supportedFormats = (Array.isArray(meta.formats) ? meta.formats : [])
             .map((f) => String(f).toUpperCase());
         const formatOptions = (formatDef && Array.isArray(formatDef.options)) ? formatDef.options : [];
@@ -588,12 +534,9 @@ define([
         const totalPages = Math.max(1, Math.ceil(rows.length / PREVIEW_PAGE_SIZE));
         const colCount = previewData.headers.length;
 
-        // Filas de la tabla: cada "padre" lleva data-page + data-group (el mismo
-        // groupId lo llevan también TODAS sus sub-filas, tengan o no toggle de
-        // collapse) — necesario para que el Search pueda mostrar la fila padre
-        // completa junto con sus sub-filas como una sola unidad (ver <script>).
-        // Si sus recetas superan el umbral, las sub-filas nacen ocultas
-        // (display:none) detrás de un toggle.
+        // Cada fila "padre" lleva data-page + data-group; TODAS sus sub-filas
+        // comparten el mismo data-group (con o sin collapse) para que el
+        // Search pueda mostrar padre + sub-filas como unidad (ver <script>).
         let bodyRowsHtml = '';
         rows.forEach((row, idx) => {
             const page = Math.floor(idx / PREVIEW_PAGE_SIZE) + 1;
@@ -661,7 +604,7 @@ define([
         <button type="button" class="pb-page-btn" id="pbNextBtn">Next &#8250;</button>
     </div>
 
-    <div class="pb-footer-note">Preebook Reports &middot; previsualizaci&oacute;n embebida</div>
+    <div class="pb-footer-note">Preebook Reports &middot; embedded preview</div>
 </div>
 <script>
 (function () {
@@ -673,8 +616,8 @@ define([
 
     function isExpanded(group) {
         var t = root.querySelector('.pb-toggle-row[data-group="' + group + '"]');
-        // Sin toggle-row para este grupo => no es un grupo colapsable (recipeCount
-        // por debajo del umbral); sus sub-filas se consideran "siempre expandidas".
+        // Sin toggle-row para este grupo => no es colapsable (recipeCount bajo
+        // el umbral); sus sub-filas se consideran "siempre expandidas".
         if (!t) return true;
         return t.getAttribute('data-expanded') === '1';
     }
@@ -707,7 +650,7 @@ define([
             if (!toggleRow) return;
             var expanded = toggleRow.getAttribute('data-expanded') === '1';
             toggleRow.setAttribute('data-expanded', expanded ? '0' : '1');
-            btn.innerHTML = (expanded ? '&#9656; Ver todas las recetas (' : '&#9662; Ocultar recetas adicionales (') + count + ')';
+            btn.innerHTML = (expanded ? '&#9656; View all recipes (' : '&#9662; Hide additional recipes (') + count + ')';
             if (!searching) applyPage(currentPage);
         });
     });
@@ -732,11 +675,9 @@ define([
             searching = true;
             if (pagination) pagination.style.display = 'none';
 
-            // El match se evalúa SOLO contra la 2da columna (índice 1, ej. product
-            // code) de las filas padre — nunca de las sub-filas de receta. Así, al
-            // buscar un artículo, se muestra la fila padre COMPLETA junto con
-            // TODAS sus sub-filas (mismo data-group), en vez de dejar sub-filas
-            // sueltas visibles sin la información principal del item.
+            // Match SOLO contra la 2da columna (índice 1, ej. product code) de
+            // filas padre — nunca de sub-filas. Muestra la fila padre COMPLETA
+            // junto con todas sus sub-filas (mismo data-group) como unidad.
             var matchedGroups = {};
             allRows.forEach(function (tr) {
                 if (!tr.classList.contains('pb-row') || tr.classList.contains('pb-subrow')) return;
@@ -753,9 +694,8 @@ define([
         });
     }
 
-    // Reusa el form NATIVO de NetSuite (main_form) para descargar: setea el
-    // campo oculto de acción a "generate" y el campo oculto del formato elegido,
-    // y envía el form tal cual — handleGenerate() del server no cambia en nada.
+    // Reusa el form nativo de NetSuite (main_form): setea acción=generate +
+    // formato elegido, y envía — handleGenerate() del server no cambia.
     window.pbDownload = function (formatValue) {
         var actionEl = document.getElementById('${FLD_ACTION}');
         var formatEl = document.getElementById('${formatFieldId}');
@@ -770,10 +710,8 @@ define([
 </script>`;
     };
 
-    // CSS del preview embebido: namespaced bajo #pb-preview-root para no afectar
-    // el resto de la página de NetSuite. Paleta neutra + acento índigo, tipografía
-    // del sistema (sin CDN externo), tabla con header sticky y scroll horizontal
-    // para reportes anchos (ej. R1 tiene 17 columnas). Sin dependencias JS externas.
+    // CSS del preview embebido, namespaced bajo #pb-preview-root. Paleta neutra
+    // + acento índigo, tipografía del sistema (sin CDN externo), header sticky.
     const PREVIEW_CSS = `
         #pb-preview-root {
             --pb-bg: #f4f6f9;
