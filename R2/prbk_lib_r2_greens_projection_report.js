@@ -74,7 +74,12 @@ define([
                 { value: 'EXCEL', text: 'Excel' },
                 { value: 'PDF', text: 'PDF' }
             ],
-            helpText: 'Seleccione el formato del documento a generar (Excel o PDF).'
+            helpText: 'Seleccione el formato del documento a generar (Excel o PDF).',
+            // previewChoice: el shell oculta este campo del formulario de filtros
+            // cuando la librería implementa getPreviewData() — el formato se elige
+            // desde los botones "Download Excel" / "Download PDF" de la pantalla
+            // de previsualización, no antes. Ver prbk_sl_reports_shell.js.
+            previewChoice: true
         }
     ]);
 
@@ -145,6 +150,64 @@ define([
 
         const reportExcel = crearExcel(headers, rows, `${baseName}.xlsx`, prebookId, preebookData);
         return { fileObj: reportExcel, contentType: 'application/vnd.ms-excel', filename: `${baseName}.xls` };
+    };
+
+    // =========================================================================
+    // 4b. GET PREVIEW DATA — misma data/estructura que crearExcel, pero en JSON
+    //     plano para que el shell la pinte en la pantalla de previsualización.
+    //     No genera ningún archivo; no toca generate/crearExcel/crearPDF.
+    // =========================================================================
+
+    /**
+     * @param {Object} filterValues - filterValues.prebook (output_format no aplica aquí:
+     *                                 se elige en la pantalla de preview vía previewChoice).
+     * @returns {Object} { title, prebookName, metaLines, headers, rows, rowCount }
+     */
+    const getPreviewData = (filterValues) => {
+        const prebookId = String(filterValues.prebook);
+        log.audit('GREENS.getPreviewData', `prebook=${prebookId}`);
+
+        const preebookData = search.lookupFields({
+            type: 'customrecord_sgp_prebook',
+            id: prebookId,
+            columns: [
+                'custrecord_sgp_pb_historical_start_date',
+                'custrecord_sgp_pb_historical_end_date',
+                'name',
+                'custrecord_sgp_pb_current_start_date'
+            ]
+        });
+        const historicalStart = safeStr(preebookData?.custrecord_sgp_pb_historical_start_date);
+        const historicalEnd = safeStr(preebookData?.custrecord_sgp_pb_historical_end_date);
+
+        const rows = loadBomComponents(prebookId, historicalStart, historicalEnd);
+
+        const headers = ['CAT', 'PRODUCT CODE', 'PRODUCT DESCRIPTION', 'PACK PK/STM', 'STEMS NEEDED',
+            'BUNCHES NEEDED', 'CASES NEEDED', 'QUANTITY ONHAND', 'UNIT PREP COMP', 'PO RECVD LOC1',
+            'IN BOUND LOC1', 'CASES SHORT LOC1', 'CASES OVER LOC1'];
+
+        // Mismo orden de columnas que crearExcel (una fila por item, sin sub-filas).
+        const flatRows = rows.map((r) => ([
+            safeStr(r.cat), safeStr(r.productCode), safeStr(r.description), safeStr(r.pkstm),
+            String(r.stemsNeeded || 0), String(r.bunchesNeeded || 0), String(r.casesNeeded || 0),
+            String(r.qtyOnHand || 0), String(r.unitprepcomp || 0), String(r.poReceived || 0),
+            String(r.inBound || 0),
+            (r.casesShort === '' || r.casesShort == null ? '' : String(r.casesShort)),
+            (r.casesOver === '' || r.casesOver == null ? '' : String(r.casesOver))
+        ]));
+
+        return {
+            title: 'All Raw Materials Projection - Greens',
+            prebookName: safeStr(preebookData?.name) || prebookId,
+            metaLines: [
+                `WO720.R # ${prebookId} — ALL RAW MATERIALS PROJECTION REPORT FOR ALL RECIPES`,
+                `PREPARED FOR: ${safeStr(preebookData?.name)}`,
+                `ALL SUB CATS - History: ${historicalStart} - ${historicalEnd}  RELATING TO Current: ${safeStr(preebookData?.custrecord_sgp_pb_current_start_date)}`
+            ],
+            headers: headers,
+            rows: flatRows,
+            rowCount: rows.length
+        };
     };
 
     // =========================================================================
@@ -787,6 +850,7 @@ define([
         getMetadata,
         getFilterDefinitions,
         validateFilters,
-        generate
+        generate,
+        getPreviewData
     };
 });

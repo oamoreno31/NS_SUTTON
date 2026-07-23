@@ -59,7 +59,12 @@ define([
                 { value: 'EXCEL', text: 'Excel' },
                 { value: 'PDF', text: 'PDF' }
             ],
-            helpText: 'Seleccione el formato del documento a generar (Excel o PDF).'
+            helpText: 'Seleccione el formato del documento a generar (Excel o PDF).',
+            // previewChoice: el shell oculta este campo del formulario de filtros
+            // cuando la librería implementa getPreviewData() — el formato se elige
+            // desde los botones "Download Excel" / "Download PDF" de la pantalla
+            // de previsualización, no antes. Ver prbk_sl_reports_shell.js.
+            previewChoice: true
         }
     ]);
 
@@ -96,14 +101,8 @@ define([
         const format = String(filterValues.output_format || 'EXCEL').toUpperCase();
         log.audit('HARDGOODS.generate', `prebook=${prebookId} (referencia)  format=${format}`);
 
-        // ── 1. Ítems hardgoods + recetas (BOM) donde están relacionados ──────
-        //    Por ahora NO incluye explosión de componentes, proyección, PO ni
-        //    inventario: esas columnas quedan en 0/blanco y se van a ir
-        //    completando progresivamente.
-        const bomRows = loadHardgoodsBomList(prebookId);
-        log.audit('HARDGOODS.bomRows', `count=${bomRows.length}`);
-
-        // ── 2. Cabecera del Prebook (mismo formato original) ─────────────────
+        // ── 1. Cabecera del Prebook (se necesita ANTES de cargar filas: el rango
+        //    historical start/end se usa para filtrar las BomRevision vigentes) ──
         //    NOTA: se sanitiza el resultado porque search.lookupFields puede devolver,
         //    para campos vacíos (típicamente fechas), un objeto Java interno
         //    (ScriptNullObjectAdapter) en vez de null/undefined. Si eso no se limpia
@@ -122,6 +121,14 @@ define([
         Object.keys(preebookDataRaw).forEach((k) => {
             preebookData[k] = safeStr(preebookDataRaw[k]);
         });
+        const historicalStart = preebookData.custrecord_sgp_pb_historical_start_date;
+        const historicalEnd = preebookData.custrecord_sgp_pb_historical_end_date;
+
+        // ── 2. Ítems hardgoods + recetas (BOM) donde están relacionados ──────
+        //    Solo se consideran BomRevision vigentes en el rango historical del
+        //    Prebook (ver revisionQualifies dentro de loadHardgoodsBomList).
+        const bomRows = loadHardgoodsBomList(prebookId, historicalStart, historicalEnd);
+        log.audit('HARDGOODS.bomRows', `count=${bomRows.length}`);
 
         // Encabezados ORIGINALES del reporte — no cambiar este set de columnas.
         // Las que todavía no tienen dato (TOTAL UNITS, +/-, LOC1/LOC2 OH UNITS,
@@ -140,6 +147,115 @@ define([
 
         const reportExcel = crearExcel(headers, bomRows, `${baseName}.xlsx`, prebookId, preebookData);
         return { fileObj: reportExcel, contentType: 'application/vnd.ms-excel', filename: `${baseName}.xls` };
+    };
+
+    // =========================================================================
+    // 4b. GET PREVIEW DATA — misma data/estructura que crearExcel, pero en JSON
+    //     plano para que el shell la pinte en la pantalla de previsualización.
+    //     No genera ningún archivo; no toca generate/crearExcel/crearPDF.
+    // =========================================================================
+
+    /**
+     * @param {Object} filterValues - filterValues.prebook (output_format no aplica aquí:
+     *                                 se elige en la pantalla de preview vía previewChoice).
+     * @returns {Object} { title, prebookName, metaLines, headers, rows, rowCount }
+     */
+    const getPreviewData = (filterValues) => {
+        const prebookId = String(filterValues.prebook);
+        log.audit('HARDGOODS.getPreviewData', `prebook=${prebookId}`);
+
+        // Cabecera del Prebook ANTES de cargar filas: el rango historical start/end
+        // se usa para filtrar las BomRevision vigentes (ver loadHardgoodsBomList).
+        const preebookDataRaw = search.lookupFields({
+            type: 'customrecord_sgp_prebook',
+            id: prebookId,
+            columns: [
+                'name',
+                'custrecord_sgp_pb_historical_start_date',
+                'custrecord_sgp_pb_historical_end_date'
+            ]
+        });
+        const preebookData = {};
+        Object.keys(preebookDataRaw).forEach((k) => { preebookData[k] = safeStr(preebookDataRaw[k]); });
+
+        const bomRows = loadHardgoodsBomList(
+            prebookId,
+            preebookData.custrecord_sgp_pb_historical_start_date,
+            preebookData.custrecord_sgp_pb_historical_end_date
+        );
+
+        const headers = ['CAT', 'PRODUCT', 'DESCRIPTION', 'TYPE', '# RECIPES', 'CODE DESCRIPTION', 'CUST', 'CUSTOMER NAME',
+            'TOTAL UNITS', '+ -', 'FOB COST', 'LANDED COST', 'LOC1 OH UNITS', 'LOC2 OH UNITS',
+            'PO QTY', 'PO RECEIVED', 'PREP PRODUCTION'];
+
+        return {
+            title: 'Hardgoods Buying Report',
+            prebookName: preebookData.name || prebookId,
+            metaLines: [
+                `WO720 Report # ${prebookId} — WHERE USED REPORTING`,
+                `History: ${preebookData.custrecord_sgp_pb_historical_start_date} - ${preebookData.custrecord_sgp_pb_historical_end_date}`,
+                `Current: ${preebookData.custrecord_sgp_pb_historical_start_date} - ${preebookData.custrecord_sgp_pb_historical_end_date}`
+            ],
+            headers: headers,
+            rows: buildHardgoodsPreviewRows(bomRows),
+            rowCount: bomRows.length
+        };
+    };
+
+    /**
+     * Arma `rows` (con su arreglo anidado `.recipes`) en el MISMO layout de
+     * columnas que produce `crearExcel` (fila principal con la 1ra receta +
+     * sub-filas para cada receta adicional), pero como estructura jerárquica
+     * { cells, subRows, recipeCount } en vez de filas XML — necesaria para que
+     * el shell pueda paginar por "padre" y colapsar las sub-filas cuando un item
+     * tiene muchas recetas (ver PREVIEW_COLLAPSE_THRESHOLD en el shell).
+     * Mantener espejado con crearExcel: cualquier cambio ahí que afecte el orden
+     * de columnas debe reflejarse aquí también.
+     *
+     * @param {Array<Object>} rows
+     * @returns {Array<{cells: Array<string>, subRows: Array<{cells: Array<string>}>, recipeCount: number}>}
+     */
+    const buildHardgoodsPreviewRows = (rows) => {
+        return (rows || []).map((row) => {
+            const recipes = row.recipes || [];
+            const first = recipes.length > 0 ? recipes[0] : null;
+
+            const cells = [
+                safeStr(row.cat), safeStr(row.product), safeStr(row.description),
+                safeStr(row.type), String(row.num_recipes || 0)
+            ];
+
+            if (recipes.length > 0) {
+                cells.push(
+                    first.recipe_code + (first.recipedescription ? ' - ' + first.recipedescription : ''),
+                    safeStr(first.customer_code),
+                    safeStr(first.customer_name),
+                    String(row.totalUnits || 0),
+                    '',                                    // "+ -" (sin fuente de inventario aún)
+                    String(row.fob_cost || 0),
+                    String(row.landed_cost || 0),
+                    String(row.loc_1_oh || 0),
+                    String(row.loc_2_oh || 0),
+                    String(row.po_received || 0),          // bajo "PO QTY" (réplica invertida, igual que crearExcel)
+                    String(row.po_qty || 0),               // bajo "PO RECEIVED" (réplica invertida, igual que crearExcel)
+                    ''                                      // PREP PRODUCTION
+                );
+            } else {
+                cells.push('', '', '', '', '', '', '', '', '', '', '', '');
+            }
+
+            const subRows = recipes.slice(1).map((recipe) => ({
+                cells: [
+                    '', '', '', '', '',
+                    recipe.recipe_code + (recipe.recipedescription ? ' - ' + recipe.recipedescription : ''),
+                    safeStr(recipe.customer_code),
+                    safeStr(recipe.customer_name),
+                    '', '', '', '', '', '', '', '', ''
+                ]
+            }));
+
+            return { cells: cells, subRows: subRows, recipeCount: recipes.length };
+        });
     };
 
     // =========================================================================
@@ -498,10 +614,17 @@ define([
      * Inactivos: NO se filtran. Se incluyen ítems, Bill of Materials, revisiones
      *   de BOM y clientes sin importar su estado (activo/inactivo).
      *
-     * @param {string} prebookId - Internal ID del Prebook (para proyecciones y POs).
+     * Rango de fechas: solo se consideran BomRevision cuya vigencia
+     *   [effectivestartdate, effectiveenddate] se solapa con el rango historical
+     *   del Prebook [historicalStart, historicalEnd] (ver revisionQualifies más
+     *   abajo). Mismo criterio de overlap que usa R2 (Greens) para sus recetas.
+     *
+     * @param {string} prebookId      - Internal ID del Prebook (para proyecciones y POs).
+     * @param {string} [historicalStart] - Fecha (formato de cuenta) de custrecord_sgp_pb_historical_start_date.
+     * @param {string} [historicalEnd]   - Fecha (formato de cuenta) de custrecord_sgp_pb_historical_end_date.
      * @returns {Array<Object>}
      */
-    const loadHardgoodsBomList = (prebookId) => {
+    const loadHardgoodsBomList = (prebookId, historicalStart, historicalEnd) => {
         const rows = [];
         let phase = 'init';
 
@@ -512,18 +635,23 @@ define([
                 SELECT
                     itm.id                                     AS item_id,
                     itm.itemid                                 AS item_name,
-                    itm.itemtype                                AS item_type,
+                    itm.itemtype                               AS item_type,
                     itm.displayname                            AS description,
                     itm.custitem_sgp_last_purchase_price       AS fob_cost,
                     itm.custitem_bc_lastpurchasepricewithoutla AS landed_cost,
                     SUBSTR(cat.name, 1, 3)                     AS category_code,
                     cat.name                                   AS category_name
-                FROM item itm
-                INNER JOIN customrecord_cseg_sgp_prod_cat cat
-                    ON cat.id = itm.custitem_cseg_sgp_prod_cat
-                WHERE itm.custitem_cseg_sgp_prod_cat IS NOT NULL
-                  AND LOWER(BUILTIN.DF(itm.custitem_cseg_sgp_prod_cat)) = 'hardgoods'
-                  AND itm.itemtype = 'Assembly'
+                FROM 
+                    item itm
+                INNER JOIN 
+                    customrecord_cseg_sgp_prod_cat cat ON cat.id = itm.custitem_cseg_sgp_prod_cat
+                WHERE 
+                    LOWER(cat.name) = 'hardgoods'
+                    AND itm.isinactive = 'F'
+                    AND cat.isinactive = 'F'
+                ORDER BY 
+                    itm.id ASC                                 -- OBLIGATORIO para usar FETCH FIRST
+                FETCH FIRST 8000 ROWS ONLY
             `);
 
             if (!hardgoodsItems.length) {
@@ -549,6 +677,9 @@ define([
                         brc.bomquantity AS bom_quantity
                     FROM BomRevisionComponent brc
                     WHERE brc.item IN (${inList})
+                    ORDER BY 
+                        brc.item ASC                                 -- OBLIGATORIO para usar FETCH FIRST
+                    -- FETCH FIRST 8000 ROWS ONLY
                 `).forEach((r) => {
                     const itemId = String(r.item_id);
                     const revId = String(r.revision_id);
@@ -561,23 +692,46 @@ define([
             log.audit('HARDGOODS.loadHardgoodsBomList',
                 `Revisiones de BOM donde algún ítem hardgoods aparece como componente: ${allRevisionIds.length}`);
 
-            // ── 3. Revisión → Bill of Materials padre (bomRevision.billofmaterials) ─
-            phase = '3-revision a bom';
-            const bomIdByRevision = {};   // revisionId → bomId
+            // ── 3. Revisión → Bill of Materials padre (bomRevision.billofmaterials) +
+            //      fechas de vigencia, para filtrar por el rango historical del Prebook.
+            phase = '3-revision a bom + fechas';
+            const bomIdByRevision = {};     // revisionId → bomId
+            const revisionQualifies = {};   // revisionId → boolean (vigente en el rango del Prebook)
+            const histStartDate = parseAccountDate(historicalStart);
+            const histEndDate = parseAccountDate(historicalEnd);
             const bomIdSet = {};
             chunkIds(allRevisionIds, 1000).forEach((inList) => {
                 runSuiteQLAll(`
                     SELECT
-                        br.id              AS revision_id,
-                        br.billofmaterials AS bom_id
+                        br.id                  AS revision_id,
+                        br.billofmaterials     AS bom_id,
+                        br.effectivestartdate  AS eff_start,
+                        br.effectiveenddate    AS eff_end
                     FROM bomRevision br
                     WHERE br.id IN (${inList})
+                    ORDER BY
+                        br.id ASC
+                    FETCH FIRST 4000 ROWS ONLY
                 `).forEach((r) => {
-                    bomIdByRevision[String(r.revision_id)] = String(r.bom_id);
-                    bomIdSet[String(r.bom_id)] = true;
+                    const revId = String(r.revision_id);
+                    bomIdByRevision[revId] = String(r.bom_id);
+
+                    // Vigente si se solapa con [historicalStart, historicalEnd]:
+                    // effectivestartdate <= historicalEnd AND (sin fin O effectiveenddate >= historicalStart)
+                    const effStart = parseAccountDate(r.eff_start);
+                    const effEnd = parseAccountDate(r.eff_end);
+                    let qualifies = true;
+                    if (histEndDate && effStart && effStart > histEndDate) qualifies = false;
+                    if (histStartDate && effEnd && effEnd < histStartDate) qualifies = false;
+                    revisionQualifies[revId] = qualifies;
+
+                    if (qualifies) bomIdSet[String(r.bom_id)] = true;
                 });
             });
             const bomIds = Object.keys(bomIdSet);
+            log.audit('HARDGOODS.loadHardgoodsBomList',
+                `Revisiones vigentes en [${historicalStart} - ${historicalEnd}]: ` +
+                `${Object.keys(revisionQualifies).filter((k) => revisionQualifies[k]).length} de ${allRevisionIds.length}`);
 
             // ── 4. Metadata de las Bill of Materials padre (nombre, memo, cliente) ─
             phase = '4-bom meta';
@@ -593,6 +747,9 @@ define([
                     FROM Bom b
                     LEFT JOIN Customer cust ON cust.id = b.custrecord_sgp_bom_customer
                     WHERE b.id IN (${inList})
+                    ORDER BY 
+                        b.id ASC                                 -- OBLIGATORIO para usar FETCH FIRST
+                    FETCH FIRST 4000 ROWS ONLY
                 `).forEach((r) => {
                     bomMeta[String(r.bom_id)] = {
                         recipe_code: r.recipe_code || '',
@@ -628,16 +785,20 @@ define([
             chunkIds(hardgoodsItemIds, 1000).forEach((inList) => {
                 runSuiteQLAll(`
                     SELECT
-                        tl.item                   AS item_id,
-                        SUM(tl.quantity)          AS po_qty,
-                        SUM(tl.quantityreceived)  AS po_received
-                    FROM transaction t
-                    INNER JOIN transactionline tl ON tl.transaction = t.id
-                    WHERE t.type = 'PurchOrd'
-                      AND t.custbody_sgp_report_id = ?
-                      AND tl.mainline = 'F'
-                      AND tl.item IN (${inList})
-                    GROUP BY tl.item
+                        tl.item AS item_id,
+                        SUM(ABS(tl.quantity)) AS po_qty,
+                        SUM(ABS(tl.quantityshiprecv)) AS po_received -- CORREGIDO: quantityshiprecv en lugar de quantityreceived
+                    FROM 
+                        transaction t
+                    INNER JOIN 
+                        transactionline tl ON tl.transaction = t.id
+                    WHERE 
+                        t.type = 'PurchOrd'
+                        AND t.custbody_sgp_report_id = ?
+                        AND tl.mainline = 'F'
+                        AND tl.item IN (${inList})
+                    GROUP BY 
+                        tl.item
                 `, [prebookId]).forEach((r) => {
                     poByItem[String(r.item_id)] = {
                         po_qty: Number(r.po_qty) || 0,
@@ -648,15 +809,18 @@ define([
 
             // ── 7. Armado de filas: una por ítem hardgoods, con las BOM donde ────
             //      aparece como componente (deduplicadas por bomId, usando la
-            //      revisión más reciente de cada una para el bomquantity).
+            //      revisión más reciente QUE CALIFIQUE en el rango historical del
+            //      Prebook — ver revisionQualifies del paso 3 — para el bomquantity).
             phase = '7-armado filas';
             hardgoodsItems.forEach((it) => {
                 const itemId = String(it.item_id);
                 const revData = revisionDataByItem[itemId] || {};
-                const revIds = Object.keys(revData);
+                // Solo revisiones vigentes en el rango del Prebook.
+                const revIds = Object.keys(revData).filter((revId) => revisionQualifies[revId]);
 
                 // Por cada BOM (receta), me quedo solo con la revisión de mayor ID
-                // (la más reciente) en la que el ítem aparece como componente.
+                // (la más reciente, entre las que califican) en la que el ítem
+                // aparece como componente.
                 const bestRevByBom = {};   // bomId → { revId, bomquantity }
                 revIds.forEach((revId) => {
                     const bomId = bomIdByRevision[revId];
@@ -764,6 +928,33 @@ define([
     const safeStr = (v) => (isEmptyValue(v) ? '' : String(v));
 
     /**
+     * Parsea una fecha de NetSuite (formato de cuenta, ej. "1/15/2026", o ISO
+     * "2026-01-15") a un objeto Date. Devuelve null si no se puede interpretar.
+     * Necesario para comparar effectivestartdate/enddate de BomRevision contra
+     * el rango historical start/end del Prebook sin depender del formato exacto
+     * que devuelva SuiteQL en esta cuenta. Mismo helper que en
+     * prbk_lib_r2_greens_projection_report.js.
+     */
+    const parseAccountDate = (v) => {
+        const s = safeStr(v);
+        if (!s) return null;
+        // ISO (YYYY-MM-DD[...])
+        let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+        if (m) {
+            const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+            return isNaN(d.getTime()) ? null : d;
+        }
+        // MM/DD/YYYY (formato típico de cuenta US)
+        m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+        if (m) {
+            const d = new Date(Number(m[3]), Number(m[1]) - 1, Number(m[2]));
+            return isNaN(d.getTime()) ? null : d;
+        }
+        const fallback = new Date(s);
+        return isNaN(fallback.getTime()) ? null : fallback;
+    };
+
+    /**
      * Timestamp compacto para el nombre del archivo.
      * Formato: YYYYMMDD_HHmm
      */
@@ -778,6 +969,7 @@ define([
         getMetadata,
         getFilterDefinitions,
         validateFilters,
-        generate
+        generate,
+        getPreviewData
     };
 });
