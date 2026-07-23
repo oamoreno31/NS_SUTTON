@@ -102,7 +102,7 @@ define([
         log.audit('HARDGOODS.generate', `prebook=${prebookId} (referencia)  format=${format}`);
 
         // ── 1. Cabecera del Prebook (se necesita ANTES de cargar filas: el rango
-        //    historical start/end se usa para filtrar las BomRevision vigentes) ──
+        //    CURRENT start/end se usa para filtrar las BomRevision vigentes) ──
         //    NOTA: se sanitiza el resultado porque search.lookupFields puede devolver,
         //    para campos vacíos (típicamente fechas), un objeto Java interno
         //    (ScriptNullObjectAdapter) en vez de null/undefined. Si eso no se limpia
@@ -114,20 +114,28 @@ define([
             columns: [
                 'name',
                 'custrecord_sgp_pb_historical_start_date',
-                'custrecord_sgp_pb_historical_end_date'
+                'custrecord_sgp_pb_historical_end_date',
+                'custrecord_sgp_pb_current_start_date',
+                'custrecord_sgp_pb_currency_end_date'
             ]
         });
         const preebookData = {};
         Object.keys(preebookDataRaw).forEach((k) => {
             preebookData[k] = safeStr(preebookDataRaw[k]);
         });
-        const historicalStart = preebookData.custrecord_sgp_pb_historical_start_date;
-        const historicalEnd = preebookData.custrecord_sgp_pb_historical_end_date;
+
+        // Rango a comparar contra las BomRevision: el rango CURRENT del Prebook —
+        // NO el historical (el historical cubre ~1 año hacia atrás y hacía que
+        // aparecieran recetas/revisiones de hasta un año antes del seleccionado).
+        // El historical se sigue trayendo arriba solo para el texto "History: ..."
+        // del header del Excel/PDF (sin cambios en ese display).
+        const currentStart = preebookData.custrecord_sgp_pb_current_start_date;
+        const currentEnd = preebookData.custrecord_sgp_pb_currency_end_date;
 
         // ── 2. Ítems hardgoods + recetas (BOM) donde están relacionados ──────
-        //    Solo se consideran BomRevision vigentes en el rango historical del
-        //    Prebook (ver revisionQualifies dentro de loadHardgoodsBomList).
-        const bomRows = loadHardgoodsBomList(prebookId, historicalStart, historicalEnd);
+        //    Solo se consideran BomRevision vigentes (dentro del rango CURRENT
+        //    del Prebook) y no inactivas — ver paso 2 dentro de loadHardgoodsBomList.
+        const bomRows = loadHardgoodsBomList(prebookId, currentStart, currentEnd);
         log.audit('HARDGOODS.bomRows', `count=${bomRows.length}`);
 
         // Encabezados ORIGINALES del reporte — no cambiar este set de columnas.
@@ -164,15 +172,19 @@ define([
         const prebookId = String(filterValues.prebook);
         log.audit('HARDGOODS.getPreviewData', `prebook=${prebookId}`);
 
-        // Cabecera del Prebook ANTES de cargar filas: el rango historical start/end
+        // Cabecera del Prebook ANTES de cargar filas: el rango CURRENT start/end
         // se usa para filtrar las BomRevision vigentes (ver loadHardgoodsBomList).
+        // El historical se sigue trayendo solo para el texto "History: ..." de
+        // metaLines más abajo (sin cambios en ese display).
         const preebookDataRaw = search.lookupFields({
             type: 'customrecord_sgp_prebook',
             id: prebookId,
             columns: [
                 'name',
                 'custrecord_sgp_pb_historical_start_date',
-                'custrecord_sgp_pb_historical_end_date'
+                'custrecord_sgp_pb_historical_end_date',
+                'custrecord_sgp_pb_current_start_date',
+                'custrecord_sgp_pb_currency_end_date'
             ]
         });
         const preebookData = {};
@@ -180,8 +192,8 @@ define([
 
         const bomRows = loadHardgoodsBomList(
             prebookId,
-            preebookData.custrecord_sgp_pb_historical_start_date,
-            preebookData.custrecord_sgp_pb_historical_end_date
+            preebookData.custrecord_sgp_pb_current_start_date,
+            preebookData.custrecord_sgp_pb_currency_end_date
         );
 
         const headers = ['CAT', 'PRODUCT', 'DESCRIPTION', 'TYPE', '# RECIPES', 'CODE DESCRIPTION', 'CUST', 'CUSTOMER NAME',
@@ -611,20 +623,27 @@ define([
      * Columnas AÚN NO implementadas (quedan en 0/blanco por ahora):
      *   "+ -" y loc_1_oh / loc_2_oh (sin fuente de inventario definida todavía).
      *
-     * Inactivos: NO se filtran. Se incluyen ítems, Bill of Materials, revisiones
-     *   de BOM y clientes sin importar su estado (activo/inactivo).
+     * Inactivos: SÍ se filtran (a diferencia de versiones anteriores). Se excluyen
+     *   ítems inactivos (itm.isinactive, paso 1), BomRevision inactivas (paso 2),
+     *   Bill of Materials/recetas inactivas (paso 2 y meta del paso 4) y, si el
+     *   customer asociado a la receta está inactivo, se omite su nombre/código
+     *   (la receta se sigue mostrando, igual que si no tuviera customer asignado).
      *
      * Rango de fechas: solo se consideran BomRevision cuya vigencia
-     *   [effectivestartdate, effectiveenddate] se solapa con el rango historical
-     *   del Prebook [historicalStart, historicalEnd] (ver revisionQualifies más
-     *   abajo). Mismo criterio de overlap que usa R2 (Greens) para sus recetas.
+     *   [effectivestartdate, effectiveenddate] se solapa con el rango CURRENT
+     *   del Prebook [currentStart, currentEnd] — NO el rango historical (el
+     *   historical cubre ~1 año hacia atrás; usarlo hacía aparecer recetas de
+     *   hasta un año antes del rango que el usuario en realidad seleccionó).
+     *   Este filtro se aplica YA en el paso 2 (where-used), no después: las
+     *   revisiones fuera de rango o inactivas nunca llegan a poblar
+     *   revisionDataByItem.
      *
-     * @param {string} prebookId      - Internal ID del Prebook (para proyecciones y POs).
-     * @param {string} [historicalStart] - Fecha (formato de cuenta) de custrecord_sgp_pb_historical_start_date.
-     * @param {string} [historicalEnd]   - Fecha (formato de cuenta) de custrecord_sgp_pb_historical_end_date.
+     * @param {string} prebookId    - Internal ID del Prebook (para proyecciones y POs).
+     * @param {string} [currentStart] - Fecha (formato de cuenta) de custrecord_sgp_pb_current_start_date.
+     * @param {string} [currentEnd]   - Fecha (formato de cuenta) de custrecord_sgp_pb_currency_end_date.
      * @returns {Array<Object>}
      */
-    const loadHardgoodsBomList = (prebookId, historicalStart, historicalEnd) => {
+    const loadHardgoodsBomList = (prebookId, currentStart, currentEnd) => {
         const rows = [];
         let phase = 'init';
 
@@ -662,78 +681,73 @@ define([
 
             const hardgoodsItemIds = hardgoodsItems.map((it) => String(it.item_id));
 
-            // ── 2. Where-used: en qué BomRevisionComponent aparece cada ítem
-            //      hardgoods como COMPONENTE (no su propio BOM, sino los BOM que
-            //      lo consumen). Acotado por IN (), en bloques de 1000 ítems.
-            //      Se guarda también bomquantity, necesario para TOTAL UNITS.
-            phase = '2-where-used componentes';
-            const revisionDataByItem = {};   // itemId → { revisionId: bomquantity, ... }
-            const allRevisionIdSet = {};
+            // ── 2. Where-used + fechas de vigencia + validación de inactivos: en
+            //      qué BomRevisionComponent aparece cada ítem hardgoods como
+            //      COMPONENTE (no su propio BOM, sino los BOM que lo consumen).
+            //      Se hace JOIN directo a bomRevision y Bom en la MISMA consulta
+            //      para traer de una vez: bomId, fechas de vigencia e isinactive
+            //      de ambos — así las revisiones fuera del rango historical del
+            //      Prebook o inactivas NUNCA llegan a poblar revisionDataByItem
+            //      (antes se descartaban recién al armar las filas, en el paso 7).
+            //      Acotado por IN (), en bloques de 1000 ítems.
+            phase = '2-where-used componentes + fechas + inactivos';
+            const revisionDataByItem = {};   // itemId → { revisionId: bomquantity, ... } (solo vigentes y activas)
+            const bomIdByRevision = {};      // revisionId → bomId                        (solo vigentes y activas)
+            const bomIdSet = {};             // bomId → true                              (solo BOMs con >=1 revisión que califica)
+            const currentStartDate = parseAccountDate(currentStart);
+            const currentEndDate = parseAccountDate(currentEnd);
+            let totalComponentRows = 0;
+            let qualifyingComponentRows = 0;
             chunkIds(hardgoodsItemIds, 1000).forEach((inList) => {
                 runSuiteQLAll(`
                     SELECT
-                        brc.item        AS item_id,
-                        brc.bomrevision AS revision_id,
-                        brc.bomquantity AS bom_quantity
+                        brc.item              AS item_id,
+                        brc.bomrevision       AS revision_id,
+                        brc.bomquantity       AS bom_quantity,
+                        br.billofmaterials    AS bom_id,
+                        br.effectivestartdate AS eff_start,
+                        br.effectiveenddate   AS eff_end
                     FROM BomRevisionComponent brc
+                    INNER JOIN bomRevision br ON br.id = brc.bomrevision
+                    INNER JOIN Bom b ON b.id = br.billofmaterials
                     WHERE brc.item IN (${inList})
-                    ORDER BY 
+                      AND br.isinactive = 'F'
+                      AND b.isinactive = 'F'
+                    ORDER BY
                         brc.item ASC                                 -- OBLIGATORIO para usar FETCH FIRST
                     -- FETCH FIRST 8000 ROWS ONLY
                 `).forEach((r) => {
+                    totalComponentRows++;
+
+                    // Vigente si se solapa con [currentStart, currentEnd]:
+                    // effectivestartdate <= currentEnd AND (sin fin O effectiveenddate >= currentStart)
+                    const effStart = parseAccountDate(r.eff_start);
+                    const effEnd = parseAccountDate(r.eff_end);
+                    let qualifies = true;
+                    if (currentEndDate && effStart && effStart > currentEndDate) qualifies = false;
+                    if (currentStartDate && effEnd && effEnd < currentStartDate) qualifies = false;
+                    if (!qualifies) return; // fuera del rango CURRENT del Prebook: se descarta acá mismo
+
+                    qualifyingComponentRows++;
                     const itemId = String(r.item_id);
                     const revId = String(r.revision_id);
                     if (!revisionDataByItem[itemId]) revisionDataByItem[itemId] = {};
                     revisionDataByItem[itemId][revId] = Number(r.bom_quantity) || 0;
-                    allRevisionIdSet[revId] = true;
-                });
-            });
-            const allRevisionIds = Object.keys(allRevisionIdSet);
-            log.audit('HARDGOODS.loadHardgoodsBomList',
-                `Revisiones de BOM donde algún ítem hardgoods aparece como componente: ${allRevisionIds.length}`);
-
-            // ── 3. Revisión → Bill of Materials padre (bomRevision.billofmaterials) +
-            //      fechas de vigencia, para filtrar por el rango historical del Prebook.
-            phase = '3-revision a bom + fechas';
-            const bomIdByRevision = {};     // revisionId → bomId
-            const revisionQualifies = {};   // revisionId → boolean (vigente en el rango del Prebook)
-            const histStartDate = parseAccountDate(historicalStart);
-            const histEndDate = parseAccountDate(historicalEnd);
-            const bomIdSet = {};
-            chunkIds(allRevisionIds, 1000).forEach((inList) => {
-                runSuiteQLAll(`
-                    SELECT
-                        br.id                  AS revision_id,
-                        br.billofmaterials     AS bom_id,
-                        br.effectivestartdate  AS eff_start,
-                        br.effectiveenddate    AS eff_end
-                    FROM bomRevision br
-                    WHERE br.id IN (${inList})
-                    ORDER BY
-                        br.id ASC
-                    FETCH FIRST 4000 ROWS ONLY
-                `).forEach((r) => {
-                    const revId = String(r.revision_id);
                     bomIdByRevision[revId] = String(r.bom_id);
-
-                    // Vigente si se solapa con [historicalStart, historicalEnd]:
-                    // effectivestartdate <= historicalEnd AND (sin fin O effectiveenddate >= historicalStart)
-                    const effStart = parseAccountDate(r.eff_start);
-                    const effEnd = parseAccountDate(r.eff_end);
-                    let qualifies = true;
-                    if (histEndDate && effStart && effStart > histEndDate) qualifies = false;
-                    if (histStartDate && effEnd && effEnd < histStartDate) qualifies = false;
-                    revisionQualifies[revId] = qualifies;
-
-                    if (qualifies) bomIdSet[String(r.bom_id)] = true;
+                    bomIdSet[String(r.bom_id)] = true;
                 });
             });
             const bomIds = Object.keys(bomIdSet);
             log.audit('HARDGOODS.loadHardgoodsBomList',
-                `Revisiones vigentes en [${historicalStart} - ${historicalEnd}]: ` +
-                `${Object.keys(revisionQualifies).filter((k) => revisionQualifies[k]).length} de ${allRevisionIds.length}`);
+                `Componentes BomRevisionComponent: ${totalComponentRows} totales (revisión y BOM activos), ` +
+                `${qualifyingComponentRows} vigentes en rango CURRENT [${currentStart} - ${currentEnd}]`);
 
             // ── 4. Metadata de las Bill of Materials padre (nombre, memo, cliente) ─
+            //      b.isinactive ya se validó en el paso 2 (bomIds solo contiene BOMs
+            //      activos); se repite acá como defensa adicional. El customer se
+            //      trae solo si está activo (join condicionado): si está inactivo,
+            //      la receta se muestra igual pero sin nombre/código de customer,
+            //      en vez de descartar la receta completa.
             phase = '4-bom meta';
             const bomMeta = {};   // bomId → { recipe_code, recipe_description, customer_code, customer_name }
             chunkIds(bomIds, 1000).forEach((inList) => {
@@ -745,9 +759,10 @@ define([
                         cust.entityid                 AS customer_code,
                         cust.altname                  AS customer_name
                     FROM Bom b
-                    LEFT JOIN Customer cust ON cust.id = b.custrecord_sgp_bom_customer
+                    LEFT JOIN Customer cust ON cust.id = b.custrecord_sgp_bom_customer AND cust.isinactive = 'F'
                     WHERE b.id IN (${inList})
-                    ORDER BY 
+                      AND b.isinactive = 'F'
+                    ORDER BY
                         b.id ASC                                 -- OBLIGATORIO para usar FETCH FIRST
                     FETCH FIRST 4000 ROWS ONLY
                 `).forEach((r) => {
@@ -809,14 +824,15 @@ define([
 
             // ── 7. Armado de filas: una por ítem hardgoods, con las BOM donde ────
             //      aparece como componente (deduplicadas por bomId, usando la
-            //      revisión más reciente QUE CALIFIQUE en el rango historical del
-            //      Prebook — ver revisionQualifies del paso 3 — para el bomquantity).
+            //      revisión más reciente entre las que ya calificaron — vigentes y
+            //      no inactivas — en el paso 2, para el bomquantity).
             phase = '7-armado filas';
             hardgoodsItems.forEach((it) => {
                 const itemId = String(it.item_id);
+                // revData ya solo contiene revisiones vigentes en el rango del Prebook
+                // y no inactivas (filtradas desde el origen en el paso 2).
                 const revData = revisionDataByItem[itemId] || {};
-                // Solo revisiones vigentes en el rango del Prebook.
-                const revIds = Object.keys(revData).filter((revId) => revisionQualifies[revId]);
+                const revIds = Object.keys(revData);
 
                 // Por cada BOM (receta), me quedo solo con la revisión de mayor ID
                 // (la más reciente, entre las que califican) en la que el ítem

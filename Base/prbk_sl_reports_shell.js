@@ -588,8 +588,12 @@ define([
         const totalPages = Math.max(1, Math.ceil(rows.length / PREVIEW_PAGE_SIZE));
         const colCount = previewData.headers.length;
 
-        // Filas de la tabla: cada "padre" lleva data-page; si sus recetas superan
-        // el umbral, sus sub-filas nacen ocultas (display:none) detrás de un toggle.
+        // Filas de la tabla: cada "padre" lleva data-page + data-group (el mismo
+        // groupId lo llevan también TODAS sus sub-filas, tengan o no toggle de
+        // collapse) — necesario para que el Search pueda mostrar la fila padre
+        // completa junto con sus sub-filas como una sola unidad (ver <script>).
+        // Si sus recetas superan el umbral, las sub-filas nacen ocultas
+        // (display:none) detrás de un toggle.
         let bodyRowsHtml = '';
         rows.forEach((row, idx) => {
             const page = Math.floor(idx / PREVIEW_PAGE_SIZE) + 1;
@@ -597,7 +601,7 @@ define([
             const hasCollapse = row.recipeCount != null &&
                 row.recipeCount > PREVIEW_COLLAPSE_THRESHOLD && row.subRows.length > 0;
 
-            bodyRowsHtml += `<tr class="pb-row" data-page="${page}">${row.cells.map((c) => `<td>${escapeHtml(c)}</td>`).join('')}</tr>\n`;
+            bodyRowsHtml += `<tr class="pb-row" data-page="${page}" data-group="${groupId}">${row.cells.map((c) => `<td>${escapeHtml(c)}</td>`).join('')}</tr>\n`;
 
             if (hasCollapse) {
                 bodyRowsHtml += `<tr class="pb-toggle-row" data-page="${page}" data-group="${groupId}" data-expanded="0">` +
@@ -610,7 +614,7 @@ define([
                 });
             } else {
                 row.subRows.forEach((sr) => {
-                    bodyRowsHtml += `<tr class="pb-row pb-subrow" data-page="${page}">${sr.cells.map((c) => `<td>${escapeHtml(c)}</td>`).join('')}</tr>\n`;
+                    bodyRowsHtml += `<tr class="pb-row pb-subrow" data-page="${page}" data-group="${groupId}">${sr.cells.map((c) => `<td>${escapeHtml(c)}</td>`).join('')}</tr>\n`;
                 });
             }
         });
@@ -639,7 +643,7 @@ define([
     </div>
 
     <div class="pb-toolbar">
-        <input id="pbSearchBox" class="pb-search-box" type="text" placeholder="Search in table…" autocomplete="off">
+        <input id="pbSearchBox" class="pb-search-box" type="text" placeholder="Search by product (column 2)…" autocomplete="off">
     </div>
 
     <div class="pb-table-wrap">
@@ -669,7 +673,10 @@ define([
 
     function isExpanded(group) {
         var t = root.querySelector('.pb-toggle-row[data-group="' + group + '"]');
-        return !!(t && t.getAttribute('data-expanded') === '1');
+        // Sin toggle-row para este grupo => no es un grupo colapsable (recipeCount
+        // por debajo del umbral); sus sub-filas se consideran "siempre expandidas".
+        if (!t) return true;
+        return t.getAttribute('data-expanded') === '1';
     }
 
     function applyPage(page) {
@@ -715,7 +722,7 @@ define([
     if (searchInput) {
         searchInput.addEventListener('input', function () {
             var q = searchInput.value.trim().toLowerCase();
-            var rows = root.querySelectorAll('#pbPreviewTable tbody tr[data-page]');
+            var allRows = root.querySelectorAll('#pbPreviewTable tbody tr[data-page]');
             if (!q) {
                 searching = false;
                 if (pagination) pagination.style.display = '';
@@ -724,8 +731,24 @@ define([
             }
             searching = true;
             if (pagination) pagination.style.display = 'none';
-            rows.forEach(function (tr) {
-                tr.style.display = (tr.textContent.toLowerCase().indexOf(q) !== -1) ? '' : 'none';
+
+            // El match se evalúa SOLO contra la 2da columna (índice 1, ej. product
+            // code) de las filas padre — nunca de las sub-filas de receta. Así, al
+            // buscar un artículo, se muestra la fila padre COMPLETA junto con
+            // TODAS sus sub-filas (mismo data-group), en vez de dejar sub-filas
+            // sueltas visibles sin la información principal del item.
+            var matchedGroups = {};
+            allRows.forEach(function (tr) {
+                if (!tr.classList.contains('pb-row') || tr.classList.contains('pb-subrow')) return;
+                var secondCell = tr.children[1];
+                var text = secondCell ? secondCell.textContent.toLowerCase() : '';
+                if (text.indexOf(q) !== -1) matchedGroups[tr.getAttribute('data-group')] = true;
+            });
+
+            allRows.forEach(function (tr) {
+                if (tr.classList.contains('pb-toggle-row')) { tr.style.display = 'none'; return; }
+                var group = tr.getAttribute('data-group');
+                tr.style.display = (group && matchedGroups[group]) ? '' : 'none';
             });
         });
     }

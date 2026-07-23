@@ -115,7 +115,9 @@ define([
         log.audit('GREENS.generate', `prebook=${prebookId}  format=${format}`);
 
         // ── Cabecera del Prebook (se necesita ANTES de cargar filas: el rango
-        //    historical start/end se usa para filtrar las BomRevision vigentes) ──
+        //    CURRENT start/end se usa para filtrar las BomRevision vigentes) ──
+        //    El historical se sigue trayendo solo para el texto "History: ..." del
+        //    header del Excel/PDF (sin cambios en ese display).
         const preebookData = search.lookupFields({
             type: 'customrecord_sgp_prebook',
             id: prebookId,
@@ -123,16 +125,21 @@ define([
                 'custrecord_sgp_pb_historical_start_date',
                 'custrecord_sgp_pb_historical_end_date',
                 'name',
-                'custrecord_sgp_pb_current_start_date'
-                // TODO: agregar el field del fin del período actual (p. ej.
-                //       'custrecord_sgp_pb_current_end_date') para el título "RELATING TO CURRENT PERIOD".
+                'custrecord_sgp_pb_current_start_date',
+                'custrecord_sgp_pb_currency_end_date'
             ]
         });
         const historicalStart = safeStr(preebookData?.custrecord_sgp_pb_historical_start_date);
         const historicalEnd = safeStr(preebookData?.custrecord_sgp_pb_historical_end_date);
 
+        // Rango a comparar contra las BomRevision: el rango CURRENT del Prebook —
+        // NO el historical (el historical cubre ~1 año hacia atrás y hacía que
+        // aparecieran recetas/revisiones de hasta un año antes del seleccionado).
+        const currentStart = safeStr(preebookData?.custrecord_sgp_pb_current_start_date);
+        const currentEnd = safeStr(preebookData?.custrecord_sgp_pb_currency_end_date);
+
         // ── Filas del reporte (una por item greens, agregadas para todas las recetas) ──
-        const rows = loadBomComponents(prebookId, historicalStart, historicalEnd);
+        const rows = loadBomComponents(prebookId, currentStart, currentEnd);
         log.audit('GREENS.rows', `count=${rows.length}`);
 
         // Orden/etiquetas alineadas con el mapeo oficial de columnas:
@@ -167,6 +174,9 @@ define([
         const prebookId = String(filterValues.prebook);
         log.audit('GREENS.getPreviewData', `prebook=${prebookId}`);
 
+        // El rango que filtra las BomRevision es CURRENT, no historical (ver
+        // generate() más arriba). El historical se sigue trayendo solo para el
+        // texto "History: ..." de metaLines más abajo.
         const preebookData = search.lookupFields({
             type: 'customrecord_sgp_prebook',
             id: prebookId,
@@ -174,13 +184,16 @@ define([
                 'custrecord_sgp_pb_historical_start_date',
                 'custrecord_sgp_pb_historical_end_date',
                 'name',
-                'custrecord_sgp_pb_current_start_date'
+                'custrecord_sgp_pb_current_start_date',
+                'custrecord_sgp_pb_currency_end_date'
             ]
         });
         const historicalStart = safeStr(preebookData?.custrecord_sgp_pb_historical_start_date);
         const historicalEnd = safeStr(preebookData?.custrecord_sgp_pb_historical_end_date);
+        const currentStart = safeStr(preebookData?.custrecord_sgp_pb_current_start_date);
+        const currentEnd = safeStr(preebookData?.custrecord_sgp_pb_currency_end_date);
 
-        const rows = loadBomComponents(prebookId, historicalStart, historicalEnd);
+        const rows = loadBomComponents(prebookId, currentStart, currentEnd);
 
         const headers = ['CAT', 'PRODUCT CODE', 'PRODUCT DESCRIPTION', 'PACK PK/STM', 'STEMS NEEDED',
             'BUNCHES NEEDED', 'CASES NEEDED', 'QUANTITY ONHAND', 'UNIT PREP COMP', 'PO RECVD LOC1',
@@ -449,12 +462,17 @@ define([
      *                          CASES NEEDED es una aproximación de bunches) — placeholder hasta
      *                          reconciliar unidades con el negocio.
      *
+     * Rango de fechas usado para "vigentes": el rango CURRENT del Prebook
+     *   (custrecord_sgp_pb_current_start_date / ..._currency_end_date) — NO el
+     *   historical (el historical cubre ~1 año hacia atrás y hacía aparecer
+     *   recetas/revisiones de hasta un año antes del rango seleccionado).
+     *
      * @param {string} prebookId
-     * @param {string} historicalStart - Fecha (formato de cuenta) del Prebook.
-     * @param {string} historicalEnd   - Fecha (formato de cuenta) del Prebook.
+     * @param {string} currentStart - Fecha (formato de cuenta) de custrecord_sgp_pb_current_start_date.
+     * @param {string} currentEnd   - Fecha (formato de cuenta) de custrecord_sgp_pb_currency_end_date.
      * @returns {Array<Object>}
      */
-    const loadBomComponents = (prebookId, historicalStart, historicalEnd) => {
+    const loadBomComponents = (prebookId, currentStart, currentEnd) => {
         const rows = [];
         let phase = 'init';
 
@@ -524,9 +542,9 @@ define([
             // ── 3. Revisión → Bill of Materials + fechas de vigencia ──────────
             phase = '3-revision a bom + fechas';
             const bomIdByRevision = {};     // revisionId → bomId
-            const revisionQualifies = {};   // revisionId → boolean (vigente en el rango del Prebook)
-            const histStartDate = parseAccountDate(historicalStart);
-            const histEndDate = parseAccountDate(historicalEnd);
+            const revisionQualifies = {};   // revisionId → boolean (vigente en el rango CURRENT del Prebook)
+            const currentStartDate = parseAccountDate(currentStart);
+            const currentEndDate = parseAccountDate(currentEnd);
             const bomIdSet = {};
             chunkIds(allRevisionIds, 1000).forEach((inList) => {
                 runSuiteQLAll(`
@@ -541,13 +559,13 @@ define([
                     const revId = String(r.revision_id);
                     bomIdByRevision[revId] = String(r.bom_id);
 
-                    // Vigente si se solapa con [historicalStart, historicalEnd]:
-                    // effectivestartdate <= historicalEnd AND (sin fin O effectiveenddate >= historicalStart)
+                    // Vigente si se solapa con [currentStart, currentEnd]:
+                    // effectivestartdate <= currentEnd AND (sin fin O effectiveenddate >= currentStart)
                     const effStart = parseAccountDate(r.eff_start);
                     const effEnd = parseAccountDate(r.eff_end);
                     let qualifies = true;
-                    if (histEndDate && effStart && effStart > histEndDate) qualifies = false;
-                    if (histStartDate && effEnd && effEnd < histStartDate) qualifies = false;
+                    if (currentEndDate && effStart && effStart > currentEndDate) qualifies = false;
+                    if (currentStartDate && effEnd && effEnd < currentStartDate) qualifies = false;
                     revisionQualifies[revId] = qualifies;
 
                     if (qualifies) bomIdSet[String(r.bom_id)] = true;
@@ -555,7 +573,7 @@ define([
             });
             const bomIds = Object.keys(bomIdSet);
             log.audit('GREENS.loadBomComponents',
-                `Recetas (Bom) con al menos una revisión vigente en [${historicalStart} - ${historicalEnd}]: ${bomIds.length}`);
+                `Recetas (Bom) con al menos una revisión vigente en rango CURRENT [${currentStart} - ${currentEnd}]: ${bomIds.length}`);
 
             // ── 4. Bom → producto terminado dueño de esa receta (bomassemblyitemmap) ─
             //      OJO: se asume que la tabla tiene columnas item/billofmaterials;
