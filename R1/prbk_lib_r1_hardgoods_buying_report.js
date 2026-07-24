@@ -547,27 +547,39 @@ define([
 
     /**
      * Construye las filas: ítems Hardgoods de tipo Assembly y, por cada uno,
-     * TODAS las Bill of Materials en las que aparece como COMPONENTE
-     * (where-used vía BomRevisionComponent → bomRevision → Bom), agrupadas en
-     * `row.recipes`.
+     * TODAS las Bill of Materials donde el ítem aparece como material real,
+     * usando la MISMA lógica de explosión de 2 niveles que
+     * pa_sl_bom_explosion_ui.js (BOM Explosion tool):
+     *   assembly → bom → bomRevisionBomMap → bomRevision → bomRevisionComponentMember (comp)
+     *   y si comp.itemsource IN ('WORK_ORDER','PHANTOM'), se explota un 2do nivel
+     *   (sub_iaib/sub_bom/sub_map/sub_bomRev/subcomp) para llegar al material real.
+     * El ítem que termina representando la fila (PRODUCT/CAT/DESCRIPTION/etc.) es
+     * comp.item cuando NO es WORK_ORDER/PHANTOM, o subcomp.item cuando sí lo es;
+     * si un WORK_ORDER/PHANTOM no tiene su propia sub-BOM, esa línea se descarta
+     * por completo (igual que en BOM Explosion). La BOM "padre" (para CODE
+     * DESCRIPTION/CUST/CUSTOMER NAME, fase 4) sigue siendo siempre la receta
+     * principal (bom/bomRevision de nivel 1), nunca la micro-BOM del phantom/WO.
      *
      * Filtros aplicados YA en el SQL de la fase 2 (no post-fetch en JS, para
-     * traer menos filas): br/b.isinactive = 'F', y vigencia
-     * [effectivestartdate, effectiveenddate] solapada con el rango CURRENT del
-     * Prebook [currentStart, currentEnd] (no el historical — cubre ~1 año
-     * hacia atrás). Ver toIsoDateStr/parseAccountDate.
+     * traer menos filas): bom/bomRevision.isinactive = 'F' (nivel 1 y 2), y
+     * vigencia [effectivestartdate, effectiveenddate] del nivel 1 solapada con
+     * el rango CURRENT del Prebook [currentStart, currentEnd] (no el historical
+     * — cubre ~1 año hacia atrás; el nivel 2 no se filtra por fecha, igual que
+     * en BOM Explosion). Ver toIsoDateStr/parseAccountDate.
      *
      * TOTAL UNITS = proyección del Prebook (customrecord_sgp_prebook_projection_rp,
      *   0 si no hay proyección) × bomquantity sumado entre todas las recetas donde
-     *   el ítem es componente (una sola revisión por BOM: la de ID más alto entre
-     *   las que calificaron). Si TOTAL UNITS = 0, el ítem se omite del reporte.
+     *   el ítem es material real (una sola revisión por BOM: la de ID más alto
+     *   entre las que calificaron). bomquantity de cada línea = comp.bomquantity
+     *   × subcomp.bomquantity (o × 1 si no hay 2do nivel) — mismo "total_componente"
+     *   que BOM Explosion. Si TOTAL UNITS = 0, el ítem se omite del reporte.
      * PO QTY / PO RECEIVED = de líneas de PO con custbody_sgp_report_id = este Prebook.
      * LOC1/LOC2 OH UNITS = inventario inicial del Prebook (customrecord_bc_prebookbeginninginvline,
      *   filtrado por customrecord_bc_preebookbeginninginv.custrecordprebook), misma cantidad en ambas.
      * "+ -" = LOC1 OH UNITS + PO QTY - TOTAL UNITS.
      * CAT = custitem_sgp_category.custrecord_sgp_printing_prefix.
      * FOB COST / LANDED COST redondeados a 4 decimales.
-     * BOM/BomRevision con '*' en el name quedan excluidos (fase 2).
+     * BOM/BomRevision (nivel 1) con '*' en el name quedan excluidos (fase 2).
      *
      * @param {string} prebookId
      * @param {string} [currentStart] - custrecord_sgp_pb_current_start_date
@@ -614,12 +626,21 @@ define([
 
             const hardgoodsItemIds = hardgoodsItems.map((it) => String(it.item_id));
 
-            // ── 2. Where-used, ya filtrado en SQL por activos + rango CURRENT ──
-            //      (fechas via TO_DATE con bind params — ver toIsoDateStr).
-            //      También excluye BOM/BomRevision cuyo name contenga '*'.
-            phase = '2-where-used componentes + fechas + inactivos';
-            const revisionDataByItem = {};   // itemId → { revisionId: bomquantity }
-            const bomIdByRevision = {};      // revisionId → bomId
+            // ── 2. Explosión de 2 niveles (igual que pa_sl_bom_explosion_ui.js) ──
+            //      Nivel 1: bom → bomRevisionBomMap → bomRevision → bomRevisionComponentMember.
+            //      Nivel 2 (solo si comp.itemsource es WORK_ORDER/PHANTOM): se repite
+            //      la cadena partiendo de comp.item como "assembly" (sub_iaib/sub_bom/
+            //      sub_map/sub_bomRev/subcomp) para llegar al material real.
+            //      item_id final = subcomp.item si hay 2do nivel, si no comp.item.
+            //      bom_quantity = comp.bomquantity × subcomp.bomquantity (× 1 si no
+            //      hay 2do nivel) = "total_componente" de BOM Explosion.
+            //      Filtrado ya en SQL: activos + rango CURRENT (solo nivel 1) +
+            //      BOM/BomRevision nivel 1 con '*' excluidos + material final
+            //      dentro de hardgoodsItemIds + WORK_ORDER/PHANTOM sin sub-BOM
+            //      se descarta (igual que BOM Explosion).
+            phase = '2-explosion 2 niveles + fechas + inactivos';
+            const revisionDataByItem = {};   // itemId → { revisionId: bomquantity (sumado) }
+            const bomIdByRevision = {};      // revisionId → bomId (siempre nivel 1)
             const bomIdSet = {};             // bomId → true
             const currentStartIso = toIsoDateStr(parseAccountDate(currentStart));
             const currentEndIso = toIsoDateStr(parseAccountDate(currentEnd));
@@ -638,34 +659,55 @@ define([
             chunkIds(hardgoodsItemIds, 1000).forEach((inList) => {
                 runSuiteQLAll(`
                     SELECT
-                        brc.item              AS item_id,
-                        brc.bomrevision       AS revision_id,
-                        brc.bomquantity       AS bom_quantity,
-                        br.billofmaterials    AS bom_id
-                    FROM BomRevisionComponent brc
-                    INNER JOIN bomRevision br ON br.id = brc.bomrevision
-                    INNER JOIN Bom b ON b.id = br.billofmaterials
-                    WHERE brc.item IN (${inList})
-                      AND br.isinactive = 'F'
-                      AND b.isinactive = 'F'
+                        b.id   AS bom_id,
+                        br.id  AS revision_id,
+                        CASE WHEN UPPER(comp.itemsource) IN ('WORK_ORDER', 'PHANTOM')
+                             THEN subcomp.item ELSE comp.item END AS item_id,
+                        (NVL(comp.bomquantity, 0) * NVL(subcomp.bomquantity, 1)) AS bom_quantity
+                    FROM bom b
+                    INNER JOIN itemAssemblyItemBom iaib ON iaib.billofmaterials = b.id
+                    INNER JOIN bomRevisionBomMap map ON map.billofmaterials = b.id
+                    INNER JOIN bomRevision br ON br.id = map.bomrevision AND NVL(br.isinactive, 'F') = 'F'
+                    INNER JOIN bomRevisionComponentMember comp ON comp.bomrevision = br.id
+                    LEFT JOIN itemAssemblyItemBom sub_iaib
+                        ON sub_iaib.assembly = comp.item
+                        AND UPPER(comp.itemsource) IN ('WORK_ORDER', 'PHANTOM')
+                    LEFT JOIN bom sub_bom ON sub_bom.id = sub_iaib.billofmaterials
+                    LEFT JOIN bomRevisionBomMap sub_map ON sub_map.billofmaterials = sub_bom.id
+                    LEFT JOIN bomRevision sub_bomRev ON sub_bomRev.id = sub_map.bomrevision AND NVL(sub_bomRev.isinactive, 'F') = 'F'
+                    LEFT JOIN bomRevisionComponentMember subcomp ON subcomp.bomrevision = sub_bomRev.id
+                    WHERE NVL(b.isinactive, 'F') = 'F'
                       AND (b.name IS NULL OR b.name NOT LIKE '%*%')
                       AND (br.name IS NULL OR br.name NOT LIKE '%*%')
+                      AND (
+                            (UPPER(comp.itemsource) IN ('WORK_ORDER', 'PHANTOM') AND subcomp.item IS NOT NULL)
+                            OR
+                            (UPPER(comp.itemsource) NOT IN ('WORK_ORDER', 'PHANTOM'))
+                          )
+                      AND (
+                            (UPPER(comp.itemsource) IN ('WORK_ORDER', 'PHANTOM') AND subcomp.item IN (${inList}))
+                            OR
+                            (UPPER(comp.itemsource) NOT IN ('WORK_ORDER', 'PHANTOM') AND comp.item IN (${inList}))
+                          )
                       ${dateWhereSql}
                     ORDER BY
-                        brc.item ASC                                 -- OBLIGATORIO para usar FETCH FIRST
+                        b.id ASC
                 `, dateParams).forEach((r) => {
                     totalComponentRows++;
                     const itemId = String(r.item_id);
                     const revId = String(r.revision_id);
                     if (!revisionDataByItem[itemId]) revisionDataByItem[itemId] = {};
-                    revisionDataByItem[itemId][revId] = Number(r.bom_quantity) || 0;
+                    // Suma (no sobrescribe): el mismo ítem puede llegar por más de
+                    // una línea/ruta dentro de la misma revisión (directo + phantom).
+                    revisionDataByItem[itemId][revId] =
+                        (revisionDataByItem[itemId][revId] || 0) + (Number(r.bom_quantity) || 0);
                     bomIdByRevision[revId] = String(r.bom_id);
                     bomIdSet[String(r.bom_id)] = true;
                 });
             });
             const bomIds = Object.keys(bomIdSet);
             log.audit('HARDGOODS.loadHardgoodsBomList',
-                `Componentes ya filtrados en SQL (activos + rango CURRENT [${currentStart} - ${currentEnd}]): ${totalComponentRows}`);
+                `Explosión 2 niveles, ya filtrada en SQL (activos + rango CURRENT [${currentStart} - ${currentEnd}]): ${totalComponentRows} líneas, ${bomIds.length} BOMs`);
 
             // ── 3. Inventario inicial del Prebook (LOC1/LOC2 OH UNITS) ─────
             //      Misma cantidad para ambas columnas (no hay desglose por
