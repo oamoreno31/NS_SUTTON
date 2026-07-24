@@ -210,14 +210,14 @@ define([
                     first.recipe_code + (first.recipedescription ? ' - ' + first.recipedescription : ''),
                     safeStr(first.customer_code),
                     safeStr(first.customer_name),
-                    String(row.totalUnits || 0),
-                    String(row.plus_minus != null ? row.plus_minus : 0),   // "+ -": LOC1 OH menos PO QTY
+                    fmtNumber(row.totalUnits),
+                    fmtNumber(row.plus_minus),             // "+ -": LOC1 + PO QTY - TOTAL UNITS
                     String(row.fob_cost || 0),
                     String(row.landed_cost || 0),
                     String(row.loc_1_oh || 0),
                     String(row.loc_2_oh || 0),
-                    String(row.po_received || 0),          // bajo "PO QTY" (réplica invertida, igual que crearExcel)
-                    String(row.po_qty || 0),               // bajo "PO RECEIVED" (réplica invertida, igual que crearExcel)
+                    fmtNumber(row.po_received),            // bajo "PO QTY" (réplica invertida, igual que crearExcel)
+                    fmtNumber(row.po_qty),                  // bajo "PO RECEIVED" (réplica invertida, igual que crearExcel)
                     ''                                      // PREP PRODUCTION
                 );
             } else {
@@ -233,7 +233,7 @@ define([
                     '', '', '', '', '', '', '', '', ''
                 ],
                 // Solo display (toggle "See all sub total units"): total units de esta receta.
-                subTotalUnits: recipe.subTotalUnits != null ? recipe.subTotalUnits : ''
+                subTotalUnits: recipe.subTotalUnits != null ? fmtNumber(recipe.subTotalUnits) : ''
             });
 
             // Primeras 5 recetas SIEMPRE visibles (1 en `cells` + hasta 4 en visibleSubRows);
@@ -248,7 +248,7 @@ define([
                 subRows: subRows,
                 recipeCount: recipes.length,
                 // Total units de la 1ra receta (misma que se ve en la fila principal), solo display.
-                subTotalUnits: first && first.subTotalUnits != null ? first.subTotalUnits : ''
+                subTotalUnits: first && first.subTotalUnits != null ? fmtNumber(first.subTotalUnits) : ''
             };
         });
     };
@@ -361,14 +361,14 @@ define([
                     xmlString += strCell(firstRecipe.recipe_code + (firstRecipe.recipedescription ? " - " : "") + firstRecipe.recipedescription);
                     xmlString += strCell(firstRecipe.customer_code);
                     xmlString += strCell(firstRecipe.customer_name);
-                    xmlString += strCell(row.totalUnits);
-                    xmlString += strCell(row.plus_minus);    // "+ -": LOC1 OH menos PO QTY
+                    xmlString += strCell(fmtNumber(row.totalUnits));
+                    xmlString += strCell(fmtNumber(row.plus_minus));    // "+ -": LOC1 + PO QTY - TOTAL UNITS
                     xmlString += strCell(row.fob_cost);
                     xmlString += strCell(row.landed_cost);
                     xmlString += strCell(row.loc_1_oh);
                     xmlString += strCell(row.loc_2_oh);
-                    xmlString += strCell(row.po_received);   // bajo "PO QTY" (réplica invertida del Excel)
-                    xmlString += strCell(row.po_qty);        // bajo "PO RECEIVED" (réplica invertida del Excel)
+                    xmlString += strCell(fmtNumber(row.po_received));   // bajo "PO QTY" (réplica invertida del Excel)
+                    xmlString += strCell(fmtNumber(row.po_qty));        // bajo "PO RECEIVED" (réplica invertida del Excel)
                     xmlString += EMPTY;                      // PREP PRODUCTION
                     xmlString += '</Row>';
                     // Máximo 5 recetas mostradas (1 en la fila principal + hasta 4 sub-filas),
@@ -567,12 +567,16 @@ define([
      * — cubre ~1 año hacia atrás; el nivel 2 no se filtra por fecha, igual que
      * en BOM Explosion). Ver toIsoDateStr/parseAccountDate.
      *
-     * TOTAL UNITS = proyección del Prebook (customrecord_sgp_prebook_projection_rp,
-     *   0 si no hay proyección) × bomquantity sumado entre todas las recetas donde
-     *   el ítem es material real (una sola revisión por BOM: la de ID más alto
-     *   entre las que calificaron). bomquantity de cada línea = comp.bomquantity
-     *   × subcomp.bomquantity (o × 1 si no hay 2do nivel) — mismo "total_componente"
-     *   que BOM Explosion. Si TOTAL UNITS = 0, el ítem se omite del reporte.
+     * TOTAL UNITS — cascada MRP de 3 niveles (Recipe → Style → Raw Material):
+     *   cada receta (BOM nivel 1) tiene su propia proyección del Prebook
+     *   (customrecord_sgp_prebook_projection_rp.custrecord_sgp_product_code =
+     *   producto terminado/receta, NO el material hardgoods). subTotalUnits de
+     *   cada receta = projectedQty DE ESA receta × bomquantity de 2 niveles
+     *   (comp.bomquantity × subcomp.bomquantity, o × 1 sin 2do nivel — el
+     *   "total_componente" de BOM Explosion). TOTAL UNITS = suma de
+     *   subTotalUnits entre todas las recetas donde aparece el material (una
+     *   sola revisión por BOM: la de ID más alto entre las que calificaron).
+     *   Si TOTAL UNITS = 0, el ítem se omite del reporte.
      * PO QTY / PO RECEIVED = de líneas de PO con custbody_sgp_report_id = este Prebook.
      * LOC1/LOC2 OH UNITS = inventario inicial del Prebook (customrecord_bc_prebookbeginninginvline,
      *   filtrado por customrecord_bc_preebookbeginninginv.custrecordprebook), misma cantidad en ambas.
@@ -642,6 +646,7 @@ define([
             const revisionDataByItem = {};   // itemId → { revisionId: bomquantity (sumado) }
             const bomIdByRevision = {};      // revisionId → bomId (siempre nivel 1)
             const bomIdSet = {};             // bomId → true
+            const assemblyItemByBom = {};    // bomId → item_id del producto terminado (nivel 1, iaib.assembly)
             const currentStartIso = toIsoDateStr(parseAccountDate(currentStart));
             const currentEndIso = toIsoDateStr(parseAccountDate(currentEnd));
             const dateConds = [];
@@ -659,8 +664,9 @@ define([
             chunkIds(hardgoodsItemIds, 1000).forEach((inList) => {
                 runSuiteQLAll(`
                     SELECT
-                        b.id   AS bom_id,
-                        br.id  AS revision_id,
+                        b.id           AS bom_id,
+                        br.id          AS revision_id,
+                        iaib.assembly  AS assembly_item_id,
                         CASE WHEN UPPER(comp.itemsource) IN ('WORK_ORDER', 'PHANTOM')
                              THEN subcomp.item ELSE comp.item END AS item_id,
                         (NVL(comp.bomquantity, 0) * NVL(subcomp.bomquantity, 1)) AS bom_quantity
@@ -703,6 +709,11 @@ define([
                         (revisionDataByItem[itemId][revId] || 0) + (Number(r.bom_quantity) || 0);
                     bomIdByRevision[revId] = String(r.bom_id);
                     bomIdSet[String(r.bom_id)] = true;
+                    // Se asume 1 producto terminado por BOM (relación esperada); si hay
+                    // más de uno, gana el último visto.
+                    if (!isEmptyValue(r.assembly_item_id)) {
+                        assemblyItemByBom[String(r.bom_id)] = String(r.assembly_item_id);
+                    }
                 });
             });
             const bomIds = Object.keys(bomIdSet);
@@ -735,8 +746,11 @@ define([
             //      Customer solo si está activo (join condicionado); si está
             //      inactivo, la receta se muestra igual sin nombre/código.
             //      CODE / DESCRIPTION: recipe_code siempre es b.name (BOM name).
-            //      La descripción sale de customrecord_sgp_recipe_product_mgt
-            //      cuyo name coincide exactamente con b.name; sin coincidencia,
+            //      La descripción sale de customrecord_sgp_recipe_product_mgt,
+            //      matcheado contra b.name comparando solo la parte ANTES del
+            //      paréntesis (algunos name traen "(xx)" y otros no, pero esa
+            //      parte siempre es igual) — cubre match exacto y con sufijo
+            //      en cualquiera de los dos lados. Sin coincidencia,
             //      recipe_description queda vacío y el front solo muestra el
             //      nombre del BOM (mismo comportamiento ya existente para "sin
             //      descripción").
@@ -752,7 +766,13 @@ define([
                         cust.altname                        AS customer_name
                     FROM Bom b
                     LEFT JOIN Customer cust ON cust.id = b.custrecord_sgp_bom_customer AND cust.isinactive = 'F'
-                    LEFT JOIN customrecord_sgp_recipe_product_mgt prm ON prm.name = b.name
+                    LEFT JOIN customrecord_sgp_recipe_product_mgt prm
+                        ON TRIM(CASE WHEN INSTR(prm.name, '(') > 0
+                                     THEN SUBSTR(prm.name, 1, INSTR(prm.name, '(') - 1)
+                                     ELSE prm.name END)
+                         = TRIM(CASE WHEN INSTR(b.name, '(') > 0
+                                     THEN SUBSTR(b.name, 1, INSTR(b.name, '(') - 1)
+                                     ELSE b.name END)
                     WHERE b.id IN (${inList})
                       AND b.isinactive = 'F'
                     ORDER BY
@@ -768,10 +788,16 @@ define([
                 });
             });
 
-            // ── 5. Proyecciones del Prebook por ítem hardgoods ────────────
-            phase = '5-proyecciones prebook';
-            const projectionQtyByItem = {};
-            chunkIds(hardgoodsItemIds, 1000).forEach((inList) => {
+            // ── 5. Proyecciones del Prebook por PRODUCTO TERMINADO (nivel 1) ──
+            //      custrecord_sgp_product_code = el producto terminado/receta
+            //      (assembly_item_id de la fase 2), NO el material hardgoods.
+            //      Las PreBook Units viven en el producto terminado y bajan en
+            //      cascada multiplicando por el bomQuantity de 2 niveles (fase 2)
+            //      — igual que el diagrama de MRP (Recipe → Style → Raw Material).
+            phase = '5-proyecciones prebook (por producto terminado)';
+            const projectionQtyByAssembly = {};
+            const assemblyIds = Array.from(new Set(Object.keys(assemblyItemByBom).map((bomId) => assemblyItemByBom[bomId])));
+            chunkIds(assemblyIds, 1000).forEach((inList) => {
                 runSuiteQLAll(`
                     SELECT
                         pj.custrecord_sgp_product_code AS item_id,
@@ -782,7 +808,7 @@ define([
                       AND pj.custrecord_sgp_product_code IN (${inList})
                     GROUP BY pj.custrecord_sgp_product_code
                 `, [prebookId]).forEach((r) => {
-                    projectionQtyByItem[String(r.item_id)] = Number(r.total_qty) || 0;
+                    projectionQtyByAssembly[String(r.item_id)] = Number(r.total_qty) || 0;
                 });
             });
 
@@ -831,29 +857,34 @@ define([
                     }
                 });
 
-                // Sin proyección del Prebook para este ítem → 0 (antes caía en 1 por error).
-                const projectedQty = projectionQtyByItem[itemId] || 0;
-
+                // MRP en cascada (ver diagrama Recipe → Style → Raw Material):
+                // cada receta (BOM) tiene SU PROPIA proyección (la del producto
+                // terminado que la usa, fase 5), no una proyección global del
+                // material. subTotalUnits de cada receta = projectedQty de ESA
+                // receta × bomQuantity de 2 niveles (comp×subcomp, fase 2).
+                // TOTAL UNITS = suma de subTotalUnits entre todas las recetas
+                // (mismo "agregar por componente, sumar entre styles" del diagrama,
+                // extendido a que el material puede estar en varias recetas).
                 const recipes = Object.keys(bestRevByBom).map((bomId) => {
                     const meta = bomMeta[bomId] || {};
                     const bomQuantity = bestRevByBom[bomId].bomquantity || 0;
+                    const assemblyItemId = assemblyItemByBom[bomId];
+                    // Sin proyección del producto terminado de esta receta → 0.
+                    const recipeProjectedQty = projectionQtyByAssembly[assemblyItemId] || 0;
                     return {
                         recipeId: bomId,
                         recipe_code: meta.recipe_code || '',
                         recipedescription: meta.recipe_description || '',
                         customer_code: meta.customer_code || '',
                         customer_name: meta.customer_name || '',
-                        // Solo display (toggle "See all sub total units"): total units de ESTA
-                        // receta individual. No participa en el cálculo de TOTAL UNITS.
-                        subTotalUnits: projectedQty * bomQuantity
+                        // Total units de ESTA receta: participa en TOTAL UNITS (suma abajo).
+                        subTotalUnits: recipeProjectedQty * bomQuantity
                     };
                 }).sort((a, b) => String(a.recipe_code).localeCompare(String(b.recipe_code)));
 
-                const totalBomQty = Object.keys(bestRevByBom)
-                    .reduce((sum, bomId) => sum + (bestRevByBom[bomId].bomquantity || 0), 0);
-                const totalUnits = projectedQty * totalBomQty;
+                const totalUnits = recipes.reduce((sum, r) => sum + (r.subTotalUnits || 0), 0);
 
-                // TOTAL UNITS = 0 (sin proyección real) → el ítem no se muestra en el reporte.
+                // TOTAL UNITS = 0 (sin proyección real en ninguna receta) → el ítem no se muestra.
                 if (!totalUnits) return;
 
                 const po = poByItem[itemId] || { po_qty: 0, po_received: 0 };
@@ -901,6 +932,20 @@ define([
     // =========================================================================
     // MISC HELPERS
     // =========================================================================
+
+    /** Formatea con separador de miles (1234567 -> "1,234,567"; con decimales,
+     *  redondea a 2). Solo para presentación (TOTAL UNITS, "+ -", PO QTY,
+     *  PO RECEIVED); el valor numérico crudo no se toca en ningún cálculo. */
+    const fmtNumber = (v) => {
+        let n = Number(v);
+        if (!isFinite(n)) n = 0;
+        const neg = n < 0;
+        n = Math.abs(n);
+        const fixed = Number.isInteger(n) ? String(n) : n.toFixed(2);
+        const [intPart, decPart] = fixed.split('.');
+        const withCommas = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+        return (neg ? '-' : '') + withCommas + (decPart ? '.' + decPart : '');
+    };
 
     /** Mapea el type interno de NetSuite al texto legible del reporte. */
     const mapItemType = (nsType) => {

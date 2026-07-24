@@ -142,9 +142,10 @@
                             <td>${(r0.recipe_code!"")?xml}<#if (r0.recipedescription!"")?has_content> - ${(r0.recipedescription!"")?xml}</#if></td>
                             <td>${(r0.customer_code!"")?xml}</td>
                             <td>${(r0.customer_name!"")?xml}</td>
-                            <td class="num">${(row.totalUnits)!0}</td>
+                            <#-- #,##0.## = separador de miles, fácil lectura (TOTAL UNITS/+ -/PO QTY/PO RECEIVED) -->
+                            <td class="num">${((row.totalUnits)!0)?string("#,##0.##")}</td>
                             <#-- "+ -" = LOC1 OH UNITS + PO QTY - TOTAL UNITS (igual que el Excel) -->
-                            <td class="num">${(row.plus_minus)!0}</td>
+                            <td class="num">${((row.plus_minus)!0)?string("#,##0.##")}</td>
                             <td class="num">${(row.fob_cost)!0}</td>
                             <td class="num">${(row.landed_cost)!0}</td>
                             <td class="num">${(row.loc_1_oh)!0}</td>
@@ -152,8 +153,8 @@
                             <#-- OJO: orden espejo del Excel. Bajo "PO QTY" va po_received y
                                  bajo "PO RECEIVED" va po_qty. Para corregir, intercambiar las
                                  dos celdas siguientes. -->
-                            <td class="num">${(row.po_received)!0}</td>
-                            <td class="num">${(row.po_qty)!0}</td>
+                            <td class="num">${((row.po_received)!0)?string("#,##0.##")}</td>
+                            <td class="num">${((row.po_qty)!0)?string("#,##0.##")}</td>
                             <td>&nbsp;</td><#-- PREP PRODUCTION (TBD) -->
                         <#else>
                             <#-- Item sin recetas: 12 columnas en blanco -->
