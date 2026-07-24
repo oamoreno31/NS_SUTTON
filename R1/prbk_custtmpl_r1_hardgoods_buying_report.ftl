@@ -10,9 +10,7 @@
       data.report   -> Array de filas (bomRows), cada una con su arreglo anidado .recipes
       data.headers  -> Array de encabezados (mismo orden que el Excel)
       data.metadata -> { prebookId, prebookName, historicalStart, historicalEnd,
-                         generatedAt, totalRows }
-                         (el renglón "Current:" reutiliza historicalStart/historicalEnd,
-                          igual que el Excel — no existe un rango "current" separado)
+                         currentStart, currentEnd, generatedAt, totalRows }
 
     Diseño espejo del Excel (crearExcel):
       - Bloque de título de 3 filas
@@ -90,7 +88,7 @@
             <td colspan="3" class="meta-line">History: ${(data.metadata.historicalStart!"")?xml} - ${(data.metadata.historicalEnd!"")?xml}</td>
         </tr>
         <tr>
-            <td colspan="3" class="meta-line">Current: ${(data.metadata.historicalStart!"")?xml} - ${(data.metadata.historicalEnd!"")?xml}</td>
+            <td colspan="3" class="meta-line">Current: ${(data.metadata.currentStart!"")?xml} - ${(data.metadata.currentEnd!"")?xml}</td>
         </tr>
     </table>
 

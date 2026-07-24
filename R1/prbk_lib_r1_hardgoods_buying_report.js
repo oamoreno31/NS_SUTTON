@@ -180,7 +180,7 @@ define([
             metaLines: [
                 `WO720 Report # ${prebookId} — WHERE USED REPORTING`,
                 `History: ${preebookData.custrecord_sgp_pb_historical_start_date} - ${preebookData.custrecord_sgp_pb_historical_end_date}`,
-                `Current: ${preebookData.custrecord_sgp_pb_historical_start_date} - ${preebookData.custrecord_sgp_pb_historical_end_date}`
+                `Current: ${preebookData.custrecord_sgp_pb_current_start_date} - ${preebookData.custrecord_sgp_pb_currency_end_date}`
             ],
             headers: headers,
             rows: buildHardgoodsPreviewRows(bomRows),
@@ -338,7 +338,7 @@ define([
                 '<Cell ss:Index="3" ss:StyleID="sPlain"><Data ss:Type="String">History: ' + escapeXml(preebookData.custrecord_sgp_pb_historical_start_date) + ' - ' + escapeXml(preebookData.custrecord_sgp_pb_historical_end_date) + '</Data></Cell>\n' +
                 '</Row>\n' +
                 '<Row>\n' +
-                '<Cell ss:Index="3" ss:StyleID="sPlain"><Data ss:Type="String">Current: ' + escapeXml(preebookData.custrecord_sgp_pb_historical_start_date) + ' - ' + escapeXml(preebookData.custrecord_sgp_pb_historical_end_date) + '</Data></Cell>\n' +
+                '<Cell ss:Index="3" ss:StyleID="sPlain"><Data ss:Type="String">Current: ' + escapeXml(preebookData.custrecord_sgp_pb_current_start_date) + ' - ' + escapeXml(preebookData.custrecord_sgp_pb_currency_end_date) + '</Data></Cell>\n' +
                 '</Row>\n';
 
             // Fila de Headers
@@ -486,6 +486,8 @@ define([
                         prebookName: preebookData.name || '',
                         historicalStart: preebookData.custrecord_sgp_pb_historical_start_date || '',
                         historicalEnd: preebookData.custrecord_sgp_pb_historical_end_date || '',
+                        currentStart: preebookData.custrecord_sgp_pb_current_start_date || '',
+                        currentEnd: preebookData.custrecord_sgp_pb_currency_end_date || '',
                         generatedAt: nowStamp(),
                         totalRows: rows.length
                     }
@@ -631,6 +633,9 @@ define([
             const hardgoodsItemIds = hardgoodsItems.map((it) => String(it.item_id));
 
             // ── 2. Explosión de 2 niveles (igual que pa_sl_bom_explosion_ui.js) ──
+            //      SELECT DISTINCT: mismo resguardo que usa pa_sl_bom_explosion_ui.js
+            //      contra filas duplicadas por fan-out de itemAssemblyItemBom (un BOM
+            //      puede estar referenciado por más de un ítem ensamblado).
             //      Nivel 1: bom → bomRevisionBomMap → bomRevision → bomRevisionComponentMember.
             //      Nivel 2 (solo si comp.itemsource es WORK_ORDER/PHANTOM): se repite
             //      la cadena partiendo de comp.item como "assembly" (sub_iaib/sub_bom/
@@ -660,10 +665,19 @@ define([
                 dateParams.push(currentStartIso);
             }
             const dateWhereSql = dateConds.length ? ' AND ' + dateConds.join(' AND ') : '';
+            // Diagnóstico: si currentStart/currentEnd llegan vacíos del Prebook, o si
+            // ambos parsean a null, dateWhereSql queda '' y NO se filtra por fecha —
+            // cualquier BomRevision con effectivestartdate/enddate NULL en ambos
+            // extremos tampoco se filtra nunca (la condición "IS NULL OR ..." la deja
+            // pasar siempre). Esto es lo primero a revisar si aparecen demasiadas
+            // recetas para un mismo ítem.
+            log.audit('HARDGOODS.loadHardgoodsBomList',
+                `Fechas CURRENT del Prebook: raw=[${currentStart} - ${currentEnd}] → ISO=[${currentStartIso} - ${currentEndIso}] → ` +
+                (dateWhereSql ? 'filtro SQL aplicado' : 'SIN FILTRO DE FECHA (fechas vacías o no parseables) — trae TODAS las revisiones activas'));
             let totalComponentRows = 0;
             chunkIds(hardgoodsItemIds, 1000).forEach((inList) => {
                 runSuiteQLAll(`
-                    SELECT
+                    SELECT DISTINCT
                         b.id           AS bom_id,
                         br.id          AS revision_id,
                         iaib.assembly  AS assembly_item_id,
@@ -856,6 +870,17 @@ define([
                         bestRevByBom[bomId] = { revId: revId, bomquantity: revData[revId] };
                     }
                 });
+
+                // Diagnóstico: un ítem con demasiadas recetas distintas suele indicar
+                // que el filtro de fecha CURRENT no está restringiendo nada (ver log
+                // de fase 2) — cada BomRevision con effective dates NULL en ambos
+                // extremos "siempre califica" y se acumula como receta aparte.
+                const RECIPE_COUNT_ALERT_THRESHOLD = 50;
+                const bomIdCount = Object.keys(bestRevByBom).length;
+                if (bomIdCount > RECIPE_COUNT_ALERT_THRESHOLD) {
+                    log.audit('HARDGOODS.loadHardgoodsBomList',
+                        `Ítem con demasiadas recetas: ${it.item_name || itemId} (id=${itemId}) → ${bomIdCount} BOMs distintos. Revisar si sus BomRevision tienen effectivestartdate/enddate en NULL (bypass del filtro CURRENT).`);
+                }
 
                 // MRP en cascada (ver diagrama Recipe → Style → Raw Material):
                 // cada receta (BOM) tiene SU PROPIA proyección (la del producto
