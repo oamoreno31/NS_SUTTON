@@ -189,10 +189,11 @@ define([
     };
 
     /**
-     * Arma `rows` jerárquicas ({ cells, subRows, recipeCount }) en el mismo
-     * layout de columnas que crearExcel, para que el shell pagine por "padre"
-     * y colapse sub-filas cuando un item tiene muchas recetas. Mantener
-     * espejado con crearExcel ante cualquier cambio de orden de columnas.
+     * Arma `rows` jerárquicas ({ cells, visibleSubRows, subRows, recipeCount })
+     * en el mismo layout de columnas que crearExcel. Primeras 5 recetas siempre
+     * visibles (cells + visibleSubRows); de la 6ta en adelante van en `subRows`,
+     * que el shell colapsa detrás de un toggle. Mantener espejado con crearExcel
+     * ante cualquier cambio de orden de columnas.
      */
     const buildHardgoodsPreviewRows = (rows) => {
         return (rows || []).map((row) => {
@@ -210,7 +211,7 @@ define([
                     safeStr(first.customer_code),
                     safeStr(first.customer_name),
                     String(row.totalUnits || 0),
-                    '',                                    // "+ -" (sin fuente de inventario aún)
+                    String(row.plus_minus != null ? row.plus_minus : 0),   // "+ -": LOC1 OH menos PO QTY
                     String(row.fob_cost || 0),
                     String(row.landed_cost || 0),
                     String(row.loc_1_oh || 0),
@@ -223,17 +224,32 @@ define([
                 cells.push('', '', '', '', '', '', '', '', '', '', '', '');
             }
 
-            const subRows = recipes.slice(1).map((recipe) => ({
+            const toSubRow = (recipe) => ({
                 cells: [
                     '', '', '', '', '',
                     recipe.recipe_code + (recipe.recipedescription ? ' - ' + recipe.recipedescription : ''),
                     safeStr(recipe.customer_code),
                     safeStr(recipe.customer_name),
                     '', '', '', '', '', '', '', '', ''
-                ]
-            }));
+                ],
+                // Solo display (toggle "See all sub total units"): total units de esta receta.
+                subTotalUnits: recipe.subTotalUnits != null ? recipe.subTotalUnits : ''
+            });
 
-            return { cells: cells, subRows: subRows, recipeCount: recipes.length };
+            // Primeras 5 recetas SIEMPRE visibles (1 en `cells` + hasta 4 en visibleSubRows);
+            // de la 6ta en adelante quedan detrás del toggle "View more recipes" (subRows).
+            const extraRecipes = recipes.slice(1);
+            const visibleSubRows = extraRecipes.slice(0, 4).map(toSubRow);
+            const subRows = extraRecipes.slice(4).map(toSubRow);
+
+            return {
+                cells: cells,
+                visibleSubRows: visibleSubRows,
+                subRows: subRows,
+                recipeCount: recipes.length,
+                // Total units de la 1ra receta (misma que se ve en la fila principal), solo display.
+                subTotalUnits: first && first.subTotalUnits != null ? first.subTotalUnits : ''
+            };
         });
     };
 
@@ -346,7 +362,7 @@ define([
                     xmlString += strCell(firstRecipe.customer_code);
                     xmlString += strCell(firstRecipe.customer_name);
                     xmlString += strCell(row.totalUnits);
-                    xmlString += EMPTY;                      // "+ -" (sin fuente de inventario aún)
+                    xmlString += strCell(row.plus_minus);    // "+ -": LOC1 OH menos PO QTY
                     xmlString += strCell(row.fob_cost);
                     xmlString += strCell(row.landed_cost);
                     xmlString += strCell(row.loc_1_oh);
@@ -355,7 +371,9 @@ define([
                     xmlString += strCell(row.po_qty);        // bajo "PO RECEIVED" (réplica invertida del Excel)
                     xmlString += EMPTY;                      // PREP PRODUCTION
                     xmlString += '</Row>';
-                    row.recipes.forEach((recipe, index) => {
+                    // Máximo 5 recetas mostradas (1 en la fila principal + hasta 4 sub-filas),
+                    // aunque haya más — # RECIPES y TOTAL UNITS siguen reflejando el total real.
+                    row.recipes.slice(0, 5).forEach((recipe, index) => {
                         if (index === 0) return; // ya impresa en la fila principal
                         xmlString += '<Row>';
                         xmlString += EMPTY + EMPTY + EMPTY + EMPTY + EMPTY;
@@ -436,9 +454,7 @@ define([
         try {
             const templateFileId = findTemplateFileId(HG_TEMPLATE_FILENAME);
             if (!templateFileId) {
-                log.error('HARDGOODS.crearPDF',
-                    `No se encontró la plantilla '${HG_TEMPLATE_FILENAME}' en el File Cabinet.`);
-                return null;
+                throw new Error(`Template '${HG_TEMPLATE_FILENAME}' not found in the File Cabinet.`);
             }
 
             const templateFile = file.load({ id: templateFileId });
@@ -451,14 +467,19 @@ define([
                 type: 'customrecord_sgp_prebook',
                 id: prebookId
             });
-            renderer.addRecord('record', preBookObj);
+            renderer.addRecord({ templateName: 'record', record: preBookObj });
 
             // Datos del reporte → ${data.report[...]} / ${data.metadata.*}
+            // Máximo 5 recetas por fila (igual que crearExcel); num_recipes/totalUnits
+            // no se tocan, siguen reflejando el total real.
+            const reportForPdf = rows.map((row) => Object.assign({}, row, {
+                recipes: (row.recipes || []).slice(0, 5)
+            }));
             renderer.addCustomDataSource({
                 format: render.DataSource.JSON,
                 alias: 'data',
                 data: JSON.stringify({
-                    report: rows,
+                    report: reportForPdf,
                     headers: headers,
                     metadata: {
                         prebookId: prebookId,
@@ -477,7 +498,7 @@ define([
             return pdfFile;
         } catch (error) {
             log.error('HARDGOODS.crearPDF', `Error al crear PDF: ${error.message}`);
-            return null;
+            throw error; // re-lanzar para que el shell muestre el mensaje (igual que crearExcel)
         }
     };
 
@@ -536,13 +557,17 @@ define([
      * Prebook [currentStart, currentEnd] (no el historical — cubre ~1 año
      * hacia atrás). Ver toIsoDateStr/parseAccountDate.
      *
-     * TOTAL UNITS = proyección del Prebook (customrecord_sgp_prebook_projection_rp)
-     *   × bomquantity sumado entre todas las recetas donde el ítem es componente
-     *   (una sola revisión por BOM: la de ID más alto entre las que calificaron).
+     * TOTAL UNITS = proyección del Prebook (customrecord_sgp_prebook_projection_rp,
+     *   0 si no hay proyección) × bomquantity sumado entre todas las recetas donde
+     *   el ítem es componente (una sola revisión por BOM: la de ID más alto entre
+     *   las que calificaron). Si TOTAL UNITS = 0, el ítem se omite del reporte.
      * PO QTY / PO RECEIVED = de líneas de PO con custbody_sgp_report_id = este Prebook.
      * LOC1/LOC2 OH UNITS = inventario inicial del Prebook (customrecord_bc_prebookbeginninginvline,
      *   filtrado por customrecord_bc_preebookbeginninginv.custrecordprebook), misma cantidad en ambas.
-     * Pendiente (blanco): "+ -" (sin fuente definida aún).
+     * "+ -" = LOC1 OH UNITS + PO QTY - TOTAL UNITS.
+     * CAT = custitem_sgp_category.custrecord_sgp_printing_prefix.
+     * FOB COST / LANDED COST redondeados a 4 decimales.
+     * BOM/BomRevision con '*' en el name quedan excluidos (fase 2).
      *
      * @param {string} prebookId
      * @param {string} [currentStart] - custrecord_sgp_pb_current_start_date
@@ -564,12 +589,14 @@ define([
                     itm.displayname                            AS description,
                     itm.custitem_sgp_last_purchase_price       AS fob_cost,
                     itm.custitem_bc_lastpurchasepricewithoutla AS landed_cost,
-                    SUBSTR(cat.name, 1, 3)                     AS category_code,
+                    catprefix.custrecord_sgp_printing_prefix   AS category_code,
                     cat.name                                   AS category_name
                 FROM
                     item itm
                 INNER JOIN
                     customrecord_cseg_sgp_prod_cat cat ON cat.id = itm.custitem_cseg_sgp_prod_cat
+                LEFT JOIN
+                    customrecord_sgp_category catprefix ON catprefix.id = itm.custitem_sgp_category
                 WHERE
                     LOWER(cat.name) = 'hardgoods'
                     AND itm.isinactive = 'F'
@@ -589,6 +616,7 @@ define([
 
             // ── 2. Where-used, ya filtrado en SQL por activos + rango CURRENT ──
             //      (fechas via TO_DATE con bind params — ver toIsoDateStr).
+            //      También excluye BOM/BomRevision cuyo name contenga '*'.
             phase = '2-where-used componentes + fechas + inactivos';
             const revisionDataByItem = {};   // itemId → { revisionId: bomquantity }
             const bomIdByRevision = {};      // revisionId → bomId
@@ -620,6 +648,8 @@ define([
                     WHERE brc.item IN (${inList})
                       AND br.isinactive = 'F'
                       AND b.isinactive = 'F'
+                      AND (b.name IS NULL OR b.name NOT LIKE '%*%')
+                      AND (br.name IS NULL OR br.name NOT LIKE '%*%')
                       ${dateWhereSql}
                     ORDER BY
                         brc.item ASC                                 -- OBLIGATORIO para usar FETCH FIRST
@@ -662,18 +692,25 @@ define([
             // ── 4. Metadata de las Bill of Materials padre ────────────────
             //      Customer solo si está activo (join condicionado); si está
             //      inactivo, la receta se muestra igual sin nombre/código.
+            //      CODE / DESCRIPTION: recipe_code siempre es b.name (BOM name).
+            //      La descripción sale de customrecord_sgp_recipe_product_mgt
+            //      cuyo name coincide exactamente con b.name; sin coincidencia,
+            //      recipe_description queda vacío y el front solo muestra el
+            //      nombre del BOM (mismo comportamiento ya existente para "sin
+            //      descripción").
             phase = '4-bom meta';
             const bomMeta = {};   // bomId → { recipe_code, recipe_description, customer_code, customer_name }
             chunkIds(bomIds, 1000).forEach((inList) => {
                 runSuiteQLAll(`
                     SELECT
-                        b.id                          AS bom_id,
-                        b.name                        AS recipe_code,
-                        b.memo                        AS recipe_description,
-                        cust.entityid                 AS customer_code,
-                        cust.altname                  AS customer_name
+                        b.id                                AS bom_id,
+                        b.name                              AS recipe_code,
+                        prm.custrecord_sgp_prm_description   AS recipe_description,
+                        cust.entityid                       AS customer_code,
+                        cust.altname                        AS customer_name
                     FROM Bom b
                     LEFT JOIN Customer cust ON cust.id = b.custrecord_sgp_bom_customer AND cust.isinactive = 'F'
+                    LEFT JOIN customrecord_sgp_recipe_product_mgt prm ON prm.name = b.name
                     WHERE b.id IN (${inList})
                       AND b.isinactive = 'F'
                     ORDER BY
@@ -752,24 +789,34 @@ define([
                     }
                 });
 
+                // Sin proyección del Prebook para este ítem → 0 (antes caía en 1 por error).
+                const projectedQty = projectionQtyByItem[itemId] || 0;
+
                 const recipes = Object.keys(bestRevByBom).map((bomId) => {
                     const meta = bomMeta[bomId] || {};
+                    const bomQuantity = bestRevByBom[bomId].bomquantity || 0;
                     return {
                         recipeId: bomId,
                         recipe_code: meta.recipe_code || '',
                         recipedescription: meta.recipe_description || '',
                         customer_code: meta.customer_code || '',
-                        customer_name: meta.customer_name || ''
+                        customer_name: meta.customer_name || '',
+                        // Solo display (toggle "See all sub total units"): total units de ESTA
+                        // receta individual. No participa en el cálculo de TOTAL UNITS.
+                        subTotalUnits: projectedQty * bomQuantity
                     };
                 }).sort((a, b) => String(a.recipe_code).localeCompare(String(b.recipe_code)));
 
                 const totalBomQty = Object.keys(bestRevByBom)
                     .reduce((sum, bomId) => sum + (bestRevByBom[bomId].bomquantity || 0), 0);
-                const projectedQty = projectionQtyByItem[itemId] || 1;
                 const totalUnits = projectedQty * totalBomQty;
+
+                // TOTAL UNITS = 0 (sin proyección real) → el ítem no se muestra en el reporte.
+                if (!totalUnits) return;
 
                 const po = poByItem[itemId] || { po_qty: 0, po_received: 0 };
                 const onHandQty = invByItem[itemId] || 0;
+                const plusMinus = onHandQty + po.po_qty - totalUnits; // "+ -": LOC1 + PO QTY - TOTAL UNITS
 
                 rows.push({
                     componentItemId: itemId,
@@ -777,14 +824,16 @@ define([
                     product: it.item_name || '',
                     description: it.description || '',
                     type: mapItemType(it.item_type),
-                    fob_cost: Number(it.fob_cost) || 0,
-                    landed_cost: Number(it.landed_cost) || 0,
+                    // Máximo 4 decimales.
+                    fob_cost: Number((Number(it.fob_cost) || 0).toFixed(4)),
+                    landed_cost: Number((Number(it.landed_cost) || 0).toFixed(4)),
                     // Mismo valor en ambas: el inventario inicial del Prebook no distingue ubicación.
                     loc_1_oh: onHandQty,
                     loc_2_oh: onHandQty,
+                    plus_minus: plusMinus,
                     po_qty: po.po_qty,
                     po_received: po.po_received,
-                    totalUnits: totalUnits+ " = "+projectedQty+ " x "+totalBomQty,
+                    totalUnits: totalUnits,
                     recipes: recipes,
                     num_recipes: recipes.length
                 });

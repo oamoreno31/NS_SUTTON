@@ -489,19 +489,25 @@ define([
     const PREVIEW_COLLAPSE_THRESHOLD = 5;
 
     /**
-     * Normaliza una entrada de previewData.rows a { cells, subRows, recipeCount }.
+     * Normaliza una entrada de previewData.rows a { cells, visibleSubRows, subRows, recipeCount }.
      * Soporta el formato plano Array<string> (sin sub-filas, ej. R2) y el
-     * jerárquico { cells, subRows, recipeCount } (con sub-filas, ej. R1).
+     * jerárquico { cells, visibleSubRows, subRows, recipeCount } (con sub-filas,
+     * ej. R1) — visibleSubRows son siempre visibles (recetas 2-5), subRows son
+     * las que el collapse oculta detrás del toggle (receta 6+).
      */
     const normalizePreviewRow = (row) => {
-        if (Array.isArray(row)) return { cells: row, subRows: [], recipeCount: null };
-        const subRows = Array.isArray(row.subRows)
-            ? row.subRows.map((sr) => (Array.isArray(sr) ? { cells: sr } : { cells: sr.cells || [] }))
-            : [];
+        if (Array.isArray(row)) {
+            return { cells: row, subRows: [], visibleSubRows: [], recipeCount: null, subTotalUnits: undefined };
+        }
+        const mapSr = (sr) => (Array.isArray(sr)
+            ? { cells: sr, subTotalUnits: undefined }
+            : { cells: sr.cells || [], subTotalUnits: sr.subTotalUnits });
         return {
             cells: row.cells || [],
-            subRows: subRows,
-            recipeCount: row.recipeCount != null ? row.recipeCount : null
+            subRows: Array.isArray(row.subRows) ? row.subRows.map(mapSr) : [],
+            visibleSubRows: Array.isArray(row.visibleSubRows) ? row.visibleSubRows.map(mapSr) : [],
+            recipeCount: row.recipeCount != null ? row.recipeCount : null,
+            subTotalUnits: row.subTotalUnits
         };
     };
 
@@ -534,35 +540,60 @@ define([
         const totalPages = Math.max(1, Math.ceil(rows.length / PREVIEW_PAGE_SIZE));
         const colCount = previewData.headers.length;
 
+        // Columna opcional "SUB TOTAL UNITS": solo aparece si la librería expone
+        // subTotalUnits en al menos una fila/sub-fila (ej. R1). Puramente visual,
+        // oculta por defecto detrás del checkbox "See all sub total units" —
+        // no participa en ningún cálculo del reporte.
+        const hasSubTotalUnits = rows.some((row) =>
+            row.subTotalUnits !== undefined ||
+            row.subRows.some((sr) => sr.subTotalUnits !== undefined) ||
+            row.visibleSubRows.some((sr) => sr.subTotalUnits !== undefined));
+        const effectiveColCount = colCount + (hasSubTotalUnits ? 1 : 0);
+        const subTotalCell = (v) => `<td class="pb-subtotal-col">${escapeHtml(v != null ? v : '')}</td>`;
+
         // Cada fila "padre" lleva data-page + data-group; TODAS sus sub-filas
-        // comparten el mismo data-group (con o sin collapse) para que el
+        // (visibles o colapsables) comparten el mismo data-group para que el
         // Search pueda mostrar padre + sub-filas como unidad (ver <script>).
+        // visibleSubRows (recetas 2-5) SIEMPRE se pintan; subRows (receta 6+)
+        // solo si recipeCount supera el umbral, detrás del toggle collapse.
         let bodyRowsHtml = '';
         rows.forEach((row, idx) => {
             const page = Math.floor(idx / PREVIEW_PAGE_SIZE) + 1;
             const groupId = 'g' + idx;
             const hasCollapse = row.recipeCount != null &&
                 row.recipeCount > PREVIEW_COLLAPSE_THRESHOLD && row.subRows.length > 0;
+            const rowSubTotalHtml = hasSubTotalUnits ? subTotalCell(row.subTotalUnits) : '';
 
-            bodyRowsHtml += `<tr class="pb-row" data-page="${page}" data-group="${groupId}">${row.cells.map((c) => `<td>${escapeHtml(c)}</td>`).join('')}</tr>\n`;
+            bodyRowsHtml += `<tr class="pb-row" data-page="${page}" data-group="${groupId}">${row.cells.map((c) => `<td>${escapeHtml(c)}</td>`).join('')}${rowSubTotalHtml}</tr>\n`;
+
+            row.visibleSubRows.forEach((sr) => {
+                const srSubTotalHtml = hasSubTotalUnits ? subTotalCell(sr.subTotalUnits) : '';
+                bodyRowsHtml += `<tr class="pb-row pb-subrow" data-page="${page}" data-group="${groupId}">${sr.cells.map((c) => `<td>${escapeHtml(c)}</td>`).join('')}${srSubTotalHtml}</tr>\n`;
+            });
 
             if (hasCollapse) {
+                const moreCount = row.subRows.length;
                 bodyRowsHtml += `<tr class="pb-toggle-row" data-page="${page}" data-group="${groupId}" data-expanded="0">` +
-                    `<td colspan="${colCount}" class="pb-toggle-cell">` +
-                    `<button type="button" class="pb-toggle-btn" data-group="${groupId}" data-count="${row.recipeCount}">` +
-                    `&#9656; View all recipes (${row.recipeCount})</button>` +
+                    `<td colspan="${effectiveColCount}" class="pb-toggle-cell">` +
+                    `<button type="button" class="pb-toggle-btn" data-group="${groupId}" data-count="${moreCount}">` +
+                    `&#9656; View ${moreCount} more recipe${moreCount === 1 ? '' : 's'}</button>` +
                     `</td></tr>\n`;
                 row.subRows.forEach((sr) => {
-                    bodyRowsHtml += `<tr class="pb-row pb-subrow" data-page="${page}" data-group="${groupId}" style="display:none">${sr.cells.map((c) => `<td>${escapeHtml(c)}</td>`).join('')}</tr>\n`;
+                    const srSubTotalHtml = hasSubTotalUnits ? subTotalCell(sr.subTotalUnits) : '';
+                    bodyRowsHtml += `<tr class="pb-row pb-subrow pb-collapsible" data-page="${page}" data-group="${groupId}" style="display:none">${sr.cells.map((c) => `<td>${escapeHtml(c)}</td>`).join('')}${srSubTotalHtml}</tr>\n`;
                 });
-            } else {
+            } else if (row.subRows.length > 0) {
+                // Defensivo: subRows sin collapse activo (librería que no siga el
+                // límite de 5) se muestran igual, sin toggle.
                 row.subRows.forEach((sr) => {
-                    bodyRowsHtml += `<tr class="pb-row pb-subrow" data-page="${page}" data-group="${groupId}">${sr.cells.map((c) => `<td>${escapeHtml(c)}</td>`).join('')}</tr>\n`;
+                    const srSubTotalHtml = hasSubTotalUnits ? subTotalCell(sr.subTotalUnits) : '';
+                    bodyRowsHtml += `<tr class="pb-row pb-subrow" data-page="${page}" data-group="${groupId}">${sr.cells.map((c) => `<td>${escapeHtml(c)}</td>`).join('')}${srSubTotalHtml}</tr>\n`;
                 });
             }
         });
 
-        const tableHeaders = previewData.headers.map((h) => `<th>${escapeHtml(h)}</th>`).join('');
+        const tableHeaders = previewData.headers.map((h) => `<th>${escapeHtml(h)}</th>`).join('') +
+            (hasSubTotalUnits ? '<th class="pb-subtotal-col">SUB TOTAL UNITS</th>' : '');
         const metaLinesHtml = (previewData.metaLines || [])
             .map((l) => `<div class="pb-meta-line">${escapeHtml(l)}</div>`).join('');
         const rowCount = previewData.rowCount != null ? previewData.rowCount : rows.length;
@@ -587,13 +618,14 @@ define([
 
     <div class="pb-toolbar">
         <input id="pbSearchBox" class="pb-search-box" type="text" placeholder="Search by product (column 2)…" autocomplete="off">
+        ${hasSubTotalUnits ? '<label class="pb-subtotal-toggle"><input type="checkbox" id="pbSubTotalToggle"> See all sub total units</label>' : ''}
     </div>
 
     <div class="pb-table-wrap">
         <table class="pb-table" id="pbPreviewTable">
             <thead><tr>${tableHeaders}</tr></thead>
             <tbody>
-                ${bodyRowsHtml || `<tr><td colspan="${colCount}" class="pb-empty-msg">No data to display for this selection.</td></tr>`}
+                ${bodyRowsHtml || `<tr><td colspan="${effectiveColCount}" class="pb-empty-msg">No data to display for this selection.</td></tr>`}
             </tbody>
         </table>
     </div>
@@ -627,7 +659,7 @@ define([
         var rows = root.querySelectorAll('#pbPreviewTable tbody tr[data-page]');
         rows.forEach(function (tr) {
             if (tr.getAttribute('data-page') !== String(page)) { tr.style.display = 'none'; return; }
-            if (tr.classList.contains('pb-subrow')) {
+            if (tr.classList.contains('pb-collapsible')) {
                 var group = tr.getAttribute('data-group');
                 tr.style.display = (group && !isExpanded(group)) ? 'none' : '';
             } else {
@@ -648,12 +680,31 @@ define([
             var count = btn.getAttribute('data-count');
             var toggleRow = root.querySelector('.pb-toggle-row[data-group="' + group + '"]');
             if (!toggleRow) return;
-            var expanded = toggleRow.getAttribute('data-expanded') === '1';
-            toggleRow.setAttribute('data-expanded', expanded ? '0' : '1');
-            btn.innerHTML = (expanded ? '&#9656; View all recipes (' : '&#9662; Hide additional recipes (') + count + ')';
-            if (!searching) applyPage(currentPage);
+            var wasExpanded = toggleRow.getAttribute('data-expanded') === '1';
+            var nowExpanded = !wasExpanded;
+            toggleRow.setAttribute('data-expanded', nowExpanded ? '1' : '0');
+            var plural = (count === '1') ? '' : 's';
+            btn.innerHTML = (wasExpanded ? '&#9656; View ' : '&#9662; Hide ') + count + ' more recipe' + plural;
+            if (searching) {
+                // applyPage() no corre durante el filtro; actualizar la visibilidad
+                // de este grupo directamente para que el toggle siga funcionando.
+                root.querySelectorAll('.pb-collapsible[data-group="' + group + '"]').forEach(function (sr) {
+                    sr.style.display = nowExpanded ? '' : 'none';
+                });
+            } else {
+                applyPage(currentPage);
+            }
         });
     });
+
+    // Checkbox "See all sub total units": muestra/oculta la columna extra
+    // vía clase CSS en el root — puramente visual, no toca paginación/search.
+    var subtotalToggle = document.getElementById('pbSubTotalToggle');
+    if (subtotalToggle) {
+        subtotalToggle.addEventListener('change', function () {
+            root.classList.toggle('pb-show-subtotal', subtotalToggle.checked);
+        });
+    }
 
     var prevBtn = document.getElementById('pbPrevBtn');
     var nextBtn = document.getElementById('pbNextBtn');
@@ -686,10 +737,17 @@ define([
                 if (text.indexOf(q) !== -1) matchedGroups[tr.getAttribute('data-group')] = true;
             });
 
+            // El collapse se respeta durante el filtro: el toggle-row se muestra
+            // si su grupo matcheó (no se oculta como antes), y las filas
+            // pb-collapsible solo aparecen si además el grupo está expandido.
             allRows.forEach(function (tr) {
-                if (tr.classList.contains('pb-toggle-row')) { tr.style.display = 'none'; return; }
                 var group = tr.getAttribute('data-group');
-                tr.style.display = (group && matchedGroups[group]) ? '' : 'none';
+                var groupMatched = !!(group && matchedGroups[group]);
+                if (tr.classList.contains('pb-collapsible')) {
+                    tr.style.display = (groupMatched && isExpanded(group)) ? '' : 'none';
+                } else {
+                    tr.style.display = groupMatched ? '' : 'none';
+                }
             });
         });
     }
@@ -759,7 +817,9 @@ define([
         }
         #pb-preview-root .pb-download-label { font-weight: 600; margin-right: 4px; }
         #pb-preview-root .pb-muted { color: var(--pb-muted); font-size: 12px; }
-        #pb-preview-root .pb-toolbar { margin-bottom: 8px; }
+        #pb-preview-root .pb-toolbar {
+            display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 8px;
+        }
         #pb-preview-root .pb-search-box {
             width: 100%; max-width: 320px; padding: 8px 12px; border-radius: 8px;
             border: 1px solid var(--pb-border); font: inherit; font-size: 12.5px;
@@ -768,6 +828,13 @@ define([
         #pb-preview-root .pb-search-box:focus {
             outline: none; border-color: var(--pb-accent); box-shadow: 0 0 0 3px rgba(79,70,229,0.12);
         }
+        #pb-preview-root .pb-subtotal-toggle {
+            display: inline-flex; align-items: center; gap: 6px;
+            font-size: 12.5px; color: var(--pb-text); cursor: pointer; user-select: none;
+        }
+        #pb-preview-root .pb-subtotal-toggle input { cursor: pointer; }
+        #pb-preview-root .pb-subtotal-col { display: none; }
+        #pb-preview-root.pb-show-subtotal .pb-subtotal-col { display: table-cell; }
         #pb-preview-root .pb-btn {
             display: inline-flex; align-items: center; justify-content: center;
             border: none; border-radius: 8px; padding: 8px 14px;

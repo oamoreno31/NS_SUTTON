@@ -143,11 +143,8 @@
                             <td>${(r0.customer_code!"")?xml}</td>
                             <td>${(r0.customer_name!"")?xml}</td>
                             <td class="num">${(row.totalUnits)!0}</td>
-                            <#-- Columna "+ -": sin fuente de inventario definida aún, queda en
-                                 blanco (igual que el Excel). Cuando se defina LOC1/LOC2 OH,
-                                 reemplazar por:
-                                 ${((row.loc_1_oh!0) + (row.loc_2_oh!0)) - (row.totalUnits!0)} -->
-                            <td>&nbsp;</td>
+                            <#-- "+ -" = LOC1 OH UNITS + PO QTY - TOTAL UNITS (igual que el Excel) -->
+                            <td class="num">${(row.plus_minus)!0}</td>
                             <td class="num">${(row.fob_cost)!0}</td>
                             <td class="num">${(row.landed_cost)!0}</td>
                             <td class="num">${(row.loc_1_oh)!0}</td>

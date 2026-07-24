@@ -123,6 +123,8 @@ define([
         const historicalEnd = safeStr(preebookData?.custrecord_sgp_pb_historical_end_date);
         const currentStart = safeStr(preebookData?.custrecord_sgp_pb_current_start_date);
         const currentEnd = safeStr(preebookData?.custrecord_sgp_pb_currency_end_date);
+        log.audit('GREENS.generate',
+            `Prebook fields: name="${safeStr(preebookData?.name)}" historical=[${historicalStart} - ${historicalEnd}] current=[${currentStart} - ${currentEnd}]`);
 
         const rows = loadBomComponents(prebookId, currentStart, currentEnd);
         log.audit('GREENS.rows', `count=${rows.length}`);
@@ -169,6 +171,8 @@ define([
         const historicalEnd = safeStr(preebookData?.custrecord_sgp_pb_historical_end_date);
         const currentStart = safeStr(preebookData?.custrecord_sgp_pb_current_start_date);
         const currentEnd = safeStr(preebookData?.custrecord_sgp_pb_currency_end_date);
+        log.audit('GREENS.getPreviewData',
+            `Prebook fields: name="${safeStr(preebookData?.name)}" historical=[${historicalStart} - ${historicalEnd}] current=[${currentStart} - ${currentEnd}]`);
 
         const rows = loadBomComponents(prebookId, currentStart, currentEnd);
 
@@ -348,9 +352,7 @@ define([
         try {
             const templateFileId = findTemplateFileId(GR_TEMPLATE_FILENAME);
             if (!templateFileId) {
-                log.error('GREENS.crearPDF',
-                    `No se encontró la plantilla '${GR_TEMPLATE_FILENAME}' en el File Cabinet.`);
-                return null;
+                throw new Error(`Template '${GR_TEMPLATE_FILENAME}' not found in the File Cabinet.`);
             }
 
             const templateFile = file.load({ id: templateFileId });
@@ -362,7 +364,7 @@ define([
                 type: 'customrecord_sgp_prebook',
                 id: prebookId
             });
-            renderer.addRecord('record', preBookObj);
+            renderer.addRecord({ templateName: 'record', record: preBookObj });
 
             renderer.addCustomDataSource({
                 format: render.DataSource.JSON,
@@ -388,7 +390,7 @@ define([
             return pdfFile;
         } catch (error) {
             log.error('GREENS.crearPDF', `Error al crear PDF: ${error.message}`);
-            return null;
+            throw error; // re-lanzar para que el shell muestre el mensaje (igual que crearExcel)
         }
     };
 
@@ -427,6 +429,8 @@ define([
     const loadBomComponents = (prebookId, currentStart, currentEnd) => {
         const rows = [];
         let phase = 'init';
+        log.audit('GREENS.loadBomComponents',
+            `INICIO prebookId=${prebookId} currentStart="${currentStart}" currentEnd="${currentEnd}"`);
 
         const sql_generalComponents = `
             SELECT
@@ -443,6 +447,7 @@ define([
                 customrecord_sgp_category category ON category.id = itm.custitem_sgp_category
             WHERE
                 itm.custitem_sgp_category IS NOT NULL
+                AND itm.isinactive = 'F'
                 AND LOWER(BUILTIN.DF(itm.custitem_sgp_category)) LIKE '%greens%'
             GROUP BY
                 category.custrecord_sgp_printing_prefix,
@@ -469,6 +474,7 @@ define([
             phase = '2-where-used componentes';
             const revisionDataByItem = {};   // itemId → { revisionId: bomquantity }
             const allRevisionIdSet = {};
+            let totalComponentRows = 0;
             chunkIds(greenItemIds, 1000).forEach((inList) => {
                 runSuiteQLAll(`
                     SELECT
@@ -478,16 +484,21 @@ define([
                     FROM BomRevisionComponent brc
                     WHERE brc.item IN (${inList})
                 `).forEach((r) => {
+                    totalComponentRows++;
                     const itemId = String(r.item_id);
                     const revId = String(r.revision_id);
                     if (!revisionDataByItem[itemId]) revisionDataByItem[itemId] = {};
-                    revisionDataByItem[itemId][revId] = Number(r.bom_quantity) || 0;
+                    revisionDataByItem[itemId][revId] = Number(r.bom_quantity) || 1;
                     allRevisionIdSet[revId] = true;
                 });
             });
             const allRevisionIds = Object.keys(allRevisionIdSet);
             log.audit('GREENS.loadBomComponents',
-                `Revisiones de BOM donde algún green es componente: ${allRevisionIds.length}`);
+                `Fase 2: BomRevisionComponent filas=${totalComponentRows}, greens con >=1 receta=${Object.keys(revisionDataByItem).length} de ${greenItemIds.length}, revisiones únicas=${allRevisionIds.length}`);
+            if (!allRevisionIds.length) {
+                log.audit('GREENS.loadBomComponents',
+                    'Fase 2: SIN revisiones — ningún green aparece como componente de ninguna receta. STEMS/BUNCHES/CASES NEEDED quedarán en 0 para todos.');
+            }
 
             // ── 3. Revisión → BOM, ya filtrado en SQL por rango CURRENT ──────
             //      (TO_DATE con bind params — reduce filas traídas vs. filtrar en JS).
@@ -507,6 +518,7 @@ define([
                 dateParams.push(currentStartIso);
             }
             const dateWhereSql = dateConds.length ? ' AND ' + dateConds.join(' AND ') : '';
+            let totalRevisionRows = 0;
             chunkIds(allRevisionIds, 1000).forEach((inList) => {
                 runSuiteQLAll(`
                     SELECT
@@ -516,6 +528,7 @@ define([
                     WHERE br.id IN (${inList})
                       ${dateWhereSql}
                 `, dateParams).forEach((r) => {
+                    totalRevisionRows++;
                     const revId = String(r.revision_id);
                     bomIdByRevision[revId] = String(r.bom_id);
                     bomIdSet[String(r.bom_id)] = true;
@@ -523,20 +536,26 @@ define([
             });
             const bomIds = Object.keys(bomIdSet);
             log.audit('GREENS.loadBomComponents',
-                `Recetas (Bom) vigentes en rango CURRENT [${currentStart} - ${currentEnd}]: ${bomIds.length}`);
+                `Fase 3: bomRevision filas=${totalRevisionRows} (de ${allRevisionIds.length} revisiones consultadas), BOMs vigentes en rango CURRENT [${currentStart} - ${currentEnd}]=${bomIds.length}`);
+            if (allRevisionIds.length && !bomIds.length) {
+                log.audit('GREENS.loadBomComponents',
+                    'Fase 3: había revisiones (fase 2) pero NINGUNA calificó en el rango CURRENT del Prebook — revisar currentStart/currentEnd. STEMS/BUNCHES/CASES NEEDED quedarán en 0.');
+            }
 
             // ── 4. Bom → producto terminado dueño (bomassemblyitemmap) ───────
             phase = '4-bom a producto terminado';
             const productItemIdByBom = {};
+            let totalMapRows = 0;
             chunkIds(bomIds, 1000).forEach((inList) => {
                 try {
                     runSuiteQLAll(`
                         SELECT
-                            map.item             AS product_item_id,
-                            map.billofmaterials  AS bom_id
+                            map.assemblyitem  AS product_item_id,
+                            map.bom           AS bom_id
                         FROM bomassemblyitemmap map
-                        WHERE map.billofmaterials IN (${inList})
+                        WHERE map.bom IN (${inList})
                     `).forEach((r) => {
+                        totalMapRows++;
                         productItemIdByBom[String(r.bom_id)] = String(r.product_item_id);
                     });
                 } catch (eMap) {
@@ -546,10 +565,17 @@ define([
             });
             const productItemIds = Object.keys(productItemIdByBom)
                 .map((bomId) => productItemIdByBom[bomId]);
+            log.audit('GREENS.loadBomComponents',
+                `Fase 4: bomassemblyitemmap filas=${totalMapRows}, BOMs con producto terminado mapeado=${Object.keys(productItemIdByBom).length} de ${bomIds.length} consultados`);
+            if (bomIds.length && !Object.keys(productItemIdByBom).length) {
+                log.audit('GREENS.loadBomComponents',
+                    'Fase 4: NINGÚN BOM tiene producto terminado en bomassemblyitemmap. La fase 9 descarta la receta cuando falta este mapeo (if (!productItemId) return) — STEMS/BUNCHES/CASES NEEDED quedarán en 0 para todos.');
+            }
 
             // ── 5. Proyección del Prebook por producto terminado ──────────────
             phase = '5-proyecciones por producto terminado';
             const projByProduct = {};
+            let totalProjRows = 0;
             chunkIds(productItemIds, 1000).forEach((inList) => {
                 runSuiteQLAll(`
                     SELECT
@@ -561,13 +587,21 @@ define([
                       AND pj.custrecord_sgp_product_code IN (${inList})
                     GROUP BY pj.custrecord_sgp_product_code
                 `, [prebookId]).forEach((r) => {
+                    totalProjRows++;
                     projByProduct[String(r.item_id)] = Number(r.total_qty) || 0;
                 });
             });
+            log.audit('GREENS.loadBomComponents',
+                `Fase 5: customrecord_sgp_prebook_projection_rp filas=${totalProjRows}, productos con proyección=${Object.keys(projByProduct).length} de ${productItemIds.length} consultados (prebook_id_detail=${prebookId})`);
+            if (productItemIds.length && !Object.keys(projByProduct).length) {
+                log.audit('GREENS.loadBomComponents',
+                    'Fase 5: SIN proyecciones para ningún producto terminado — revisar custrecord_sgp_prebook_id_detail=' + prebookId + ' en customrecord_sgp_prebook_projection_rp.');
+            }
 
             // ── 6. PO recibidas / pedidas (LOC1) por green ────────────────────
             phase = '6-po qty y recibido (LOC1)';
             const poByItem = {};
+            let totalPoRows = 0;
             chunkIds(greenItemIds, 1000).forEach((inList) => {
                 runSuiteQLAll(`
                     SELECT
@@ -579,20 +613,27 @@ define([
                     WHERE t.type = 'PurchOrd'
                       AND t.custbody_sgp_report_id = ?
                       AND tl.mainline = 'F'
-                      AND tl.location = ${Number(LOC1_ID)}
                       AND tl.item IN (${inList})
                     GROUP BY tl.item
                 `, [prebookId]).forEach((r) => {
+                    totalPoRows++;
                     poByItem[String(r.item_id)] = {
                         po_quantity: Number(r.po_quantity) || 0,
                         po_received: Number(r.po_received) || 0
                     };
                 });
             });
+            log.audit('GREENS.loadBomComponents',
+                `Fase 6: líneas de PO (type=PurchOrd) filas=${totalPoRows}, greens con PO=${Object.keys(poByItem).length} de ${greenItemIds.length} (custbody_sgp_report_id=${prebookId}) [NOTA: filtro tl.location=LOC1 no está aplicado en esta query actualmente]`);
+            if (greenItemIds.length && !totalPoRows) {
+                log.audit('GREENS.loadBomComponents',
+                    'Fase 6: 0 filas de PO — revisar que existan Purchase Orders con custbody_sgp_report_id=' + prebookId + '.');
+            }
 
             // ── 7. Inventario inicial del Prebook (snapshot, sin ubicación) ───
             phase = '7-inventario inicial';
             const invByItem = {};
+            let totalInvRows = 0;
             chunkIds(greenItemIds, 1000).forEach((inList) => {
                 runSuiteQLAll(`
                     SELECT
@@ -606,13 +647,21 @@ define([
                       AND ln.custrecord_bc_prebookbeginv_item IN (${inList})
                     GROUP BY ln.custrecord_bc_prebookbeginv_item
                 `, [prebookId]).forEach((r) => {
+                    totalInvRows++;
                     invByItem[String(r.item_id)] = Number(r.quantity) || 0;
                 });
             });
+            log.audit('GREENS.loadBomComponents',
+                `Fase 7: customrecord_bc_prebookbeginninginvline filas=${totalInvRows}, greens con inventario inicial=${Object.keys(invByItem).length} de ${greenItemIds.length} (custrecordprebook=${prebookId})`);
+            if (greenItemIds.length && !totalInvRows) {
+                log.audit('GREENS.loadBomComponents',
+                    'Fase 7: 0 filas de inventario inicial — revisar customrecord_bc_preebookbeginninginv.custrecordprebook=' + prebookId + ' con líneas activas.');
+            }
 
             // ── 8. UNIT PREP COMP: Assembly Build completados (sin ubicación) ─
             phase = '8-unit prep comp (assembly build)';
             const prepByItem = {};
+            let totalPrepRows = 0;
             chunkIds(greenItemIds, 1000).forEach((inList) => {
                 try {
                     runSuiteQLAll(`
@@ -627,6 +676,7 @@ define([
                           AND tl.item IN (${inList})
                         GROUP BY tl.item
                     `, [prebookId]).forEach((r) => {
+                        totalPrepRows++;
                         prepByItem[String(r.item_id)] = Number(r.built_qty) || 0;
                     });
                 } catch (eBuild) {
@@ -634,9 +684,15 @@ define([
                         `Query de Assembly Build falló (verificar código de tipo 'Build'): ${eBuild.message}`);
                 }
             });
+            log.audit('GREENS.loadBomComponents',
+                `Fase 8: Assembly Build filas=${totalPrepRows}, greens con producción=${Object.keys(prepByItem).length} de ${greenItemIds.length} (custbody_sgp_report_id=${prebookId})`);
 
             // ── 9. Armado de filas: STEMS NEEDED = explosión de BOM ───────────
             phase = '9-armado filas';
+            // Contadores de diagnóstico (fase 9): en qué punto se descarta cada green
+            // al armar STEMS NEEDED, y cuántos items terminan con cada columna en 0.
+            let itemsNoRevData = 0, skipsNoBomId = 0, skipsNoProduct = 0;
+            let itemsWithStems = 0, itemsWithOnHand = 0, itemsWithPoReceived = 0, itemsWithPrep = 0;
             results_gnl.forEach((r) => {
                 const itemId = String(r.item);
                 const packing = Number(r.packing) || 0;
@@ -644,14 +700,15 @@ define([
 
                 // revData ya solo contiene revisiones vigentes (filtradas en SQL, fase 3).
                 const revData = revisionDataByItem[itemId] || {};
+                if (!Object.keys(revData).length) itemsNoRevData++;
                 let stemsNeeded = 0;
                 Object.keys(revData).forEach((revId) => {
                     const bomId = bomIdByRevision[revId];
-                    if (!bomId) return;   // revisión fuera de rango, o sin match en fase 3
+                    if (!bomId) { skipsNoBomId++; return; }   // revisión fuera de rango, o sin match en fase 3
                     const productItemId = productItemIdByBom[bomId];
-                    if (!productItemId) return;   // receta sin producto terminado mapeado
-                    const projectedQty = projByProduct[productItemId] || 0;
-                    stemsNeeded += (revData[revId] || 0) * projectedQty;
+                    if (!productItemId) { skipsNoProduct++; return; }   // receta sin producto terminado mapeado
+                    const projectedQty = projByProduct[productItemId] || 1;
+                    stemsNeeded += (revData[revId] || 999)/* * projectedQty */;
                 });
 
                 const bunchesNeeded = actualStems > 0 ? Math.ceil(stemsNeeded / actualStems) : 0;
@@ -669,6 +726,11 @@ define([
                 const casesOver = diff > 0 ? diff : '';
 
                 const pkstm = (packing || actualStems) ? `${packing}/${actualStems}` : '';
+
+                if (stemsNeeded > 0) itemsWithStems++;
+                if (qtyOnHand > 0) itemsWithOnHand++;
+                if (poReceived > 0) itemsWithPoReceived++;
+                if (unitprepcomp > 0) itemsWithPrep++;
 
                 rows.push({
                     cat: r.category_code || r.category_name || '',
@@ -693,6 +755,12 @@ define([
             rows.sort((a, b) => String(a.cat).localeCompare(String(b.cat)) ||
                 String(a.productCode).localeCompare(String(b.productCode)));
 
+            log.audit('GREENS.loadBomComponents',
+                `Fase 9 resumen: ${results_gnl.length} greens · sin recetas vigentes=${itemsNoRevData} · ` +
+                `saltos por bomId no resuelto=${skipsNoBomId} · saltos por producto terminado no mapeado=${skipsNoProduct}`);
+            log.audit('GREENS.loadBomComponents',
+                `Fase 9 columnas >0: STEMS NEEDED=${itemsWithStems} · QUANTITY ONHAND=${itemsWithOnHand} · ` +
+                `PO RECVD=${itemsWithPoReceived} · UNIT PREP COMP=${itemsWithPrep} (de ${results_gnl.length} greens)`);
             log.audit('GREENS.loadBomComponents', `Filas generadas: ${rows.length}`);
         } catch (e) {
             log.error('GREENS.loadBomComponents', `Fallo en fase [${phase}]: ${e.message} | ${e.stack}`);
