@@ -466,17 +466,21 @@ define([
         log.audit('shell.preview', `${entry.code} filters=${JSON.stringify(filterValues)}`);
 
         const previewData = safeCall(() => lib.getPreviewData(filterValues), null);
-        if (!previewData || !Array.isArray(previewData.headers)) {
+        const isTabbed = !!(previewData && Array.isArray(previewData.views));
+        if (!previewData || (!isTabbed && !Array.isArray(previewData.headers))) {
             ctx.response.write(htmlError(
                 `Report ${entry.code} did not return preview data`,
-                'Check the script log. getPreviewData() must return at least { headers: [...], rows: [...] }.'
+                'Check the script log. getPreviewData() must return at least { headers: [...], rows: [...] } ' +
+                'or, for multi-view reports, { views: [{ id, label, headers, rows }, ...] }.'
             ));
             return;
         }
-        if (!Array.isArray(previewData.rows)) previewData.rows = [];
+        if (!isTabbed && !Array.isArray(previewData.rows)) previewData.rows = [];
 
         const meta = safeCall(() => lib.getMetadata(), {});
-        const previewHtml = buildPreviewFragment(entry, meta, filters, filterValues, previewData);
+        const previewHtml = isTabbed
+            ? buildTabbedPreviewFragment(entry, meta, filters, filterValues, previewData)
+            : buildPreviewFragment(entry, meta, filters, filterValues, previewData);
 
         // Repinta el MISMO form y agrega el fragmento de preview como INLINEHTML.
         renderForm(ctx, reports, entry, lib, params, { previewHtml });
@@ -544,10 +548,11 @@ define([
         // subTotalUnits en al menos una fila/sub-fila (ej. R1). Puramente visual,
         // oculta por defecto detrás del checkbox "See all sub total units" —
         // no participa en ningún cálculo del reporte.
-        const hasSubTotalUnits = rows.some((row) =>
-            row.subTotalUnits !== undefined ||
-            row.subRows.some((sr) => sr.subTotalUnits !== undefined) ||
-            row.visibleSubRows.some((sr) => sr.subTotalUnits !== undefined));
+        // const hasSubTotalUnits = rows.some((row) =>
+        //     row.subTotalUnits !== undefined ||
+        //     row.subRows.some((sr) => sr.subTotalUnits !== undefined) ||
+        //     row.visibleSubRows.some((sr) => sr.subTotalUnits !== undefined));
+        const hasSubTotalUnits = 0;
         const effectiveColCount = colCount + (hasSubTotalUnits ? 1 : 0);
         const subTotalCell = (v) => `<td class="pb-subtotal-col">${escapeHtml(v != null ? v : '')}</td>`;
 
@@ -636,7 +641,7 @@ define([
         <button type="button" class="pb-page-btn" id="pbNextBtn">Next &#8250;</button>
     </div>
 
-    <div class="pb-footer-note">Preebook Reports &middot; embedded preview</div>
+    <div class="pb-footer-note">Preebook Reports</div>
 </div>
 <script>
 (function () {
@@ -768,6 +773,308 @@ define([
 </script>`;
     };
 
+    // Marcadores que una librería puede usar en la 1ra celda de una fila de
+    // previewData para pedir que se pinte como fila de sección colapsable
+    // (colspan, toggle, conteo de items) en vez de fila de datos — ver R3
+    // (groupedToPreviewRows). Formato: SECTION_MARKER + label + COUNT_MARKER + n.
+    // Deben coincidir con SECTION_MARKER/COUNT_MARKER en la librería.
+    const SECTION_MARKER = '§SECTION§';
+    const COUNT_MARKER = '§N§';
+
+    /**
+     * Construye el fragmento HTML embebido (INLINEHTML) para reportes con
+     * MÚLTIPLES vistas (previewData.views), ej. R3: Main / By Category / By
+     * Vendor. Pestañas client-side (una sola vista visible a la vez); la vista
+     * "MAIN" (1ra por convención) lleva paginación + search, el resto (vistas
+     * agrupadas) se muestran completas con scroll + search (sin paginación —
+     * cortar por página en medio de un grupo sería confuso). Los botones
+     * Download setean output_format Y view (según la pestaña activa) antes de
+     * enviar el form nativo — igual mecanismo que buildPreviewFragment.
+     */
+    const buildTabbedPreviewFragment = (entry, meta, filters, filterValues, previewData) => {
+        const formatDef = filters.find((def) => def.id === 'output_format' && def.previewChoice) || null;
+        const formatFieldId = formatDef ? (FLD_FILTER_PREFIX + formatDef.id) : '';
+        const viewDef = filters.find((def) => def.id === 'view' && def.previewChoice) || null;
+        const viewFieldId = viewDef ? (FLD_FILTER_PREFIX + viewDef.id) : '';
+
+        const supportedFormats = (Array.isArray(meta.formats) ? meta.formats : [])
+            .map((f) => String(f).toUpperCase());
+        const formatOptions = (formatDef && Array.isArray(formatDef.options)) ? formatDef.options : [];
+        const downloadButtons = formatDef ? formatOptions
+            .filter((opt) => !supportedFormats.length || supportedFormats.indexOf(String(opt.value).toUpperCase()) !== -1)
+            .map((opt) => {
+                const isExcel = /excel/i.test(String(opt.value)) || /excel/i.test(String(opt.text));
+                const cls = isExcel ? 'pb-btn pb-btn-excel' : 'pb-btn pb-btn-pdf';
+                const icon = isExcel ? '&#8681; XLS' : '&#8681; PDF';
+                return `<button type="button" class="${cls}" onclick="pbDownload('${escapeHtml(opt.value)}')">${icon}&nbsp;&nbsp;Download ${escapeHtml(opt.text)}</button>`;
+            }).join('\n') : '';
+
+        const views = (previewData.views || []).filter((v) => v && Array.isArray(v.headers));
+        const tabButtonsHtml = views.map((v, idx) =>
+            `<button type="button" class="pb-tab-btn${idx === 0 ? ' pb-tab-active' : ''}" data-view="${escapeHtml(v.id)}" onclick="pbSwitchView('${escapeHtml(v.id)}')">${escapeHtml(v.label || v.id)}</button>`
+        ).join('\n');
+
+        const PREVIEW_PAGE_SIZE_TAB = 15;
+
+        const panelsHtml = views.map((v, idx) => {
+            const rows = Array.isArray(v.rows) ? v.rows : [];
+            const colCount = v.headers.length;
+            const isMain = idx === 0;
+            const totalPages = isMain ? Math.max(1, Math.ceil(rows.length / PREVIEW_PAGE_SIZE_TAB)) : 1;
+
+            // Vistas agrupadas (CATEGORY/VENDOR): cada fila de sección (marcador
+            // SECTION_MARKER+label+COUNT_MARKER+n) se pinta como header colapsable
+            // (arranca colapsado); sus filas de datos siguientes quedan tagged con
+            // data-group y ocultas hasta que se abra el toggle o se busque algo.
+            let groupIdx = -1;
+            let currentGroupId = null;
+            let groupCount = 0;
+            const rowsHtml = rows.map((cells, rIdx) => {
+                const page = isMain ? (Math.floor(rIdx / PREVIEW_PAGE_SIZE_TAB) + 1) : 1;
+                const first = Array.isArray(cells) && typeof cells[0] === 'string' ? cells[0] : '';
+                const isSection = first.indexOf(SECTION_MARKER) === 0;
+                if (isSection) {
+                    groupIdx++;
+                    groupCount++;
+                    currentGroupId = 'grp-' + escapeHtml(v.id) + '-' + groupIdx;
+                    const rest = first.slice(SECTION_MARKER.length);
+                    const countIdx = rest.indexOf(COUNT_MARKER);
+                    const label = countIdx === -1 ? rest : rest.slice(0, countIdx);
+                    const count = countIdx === -1 ? '' : rest.slice(countIdx + COUNT_MARKER.length);
+                    const countTxt = count !== '' ? ` (${count} item${count === '1' ? '' : 's'})` : '';
+                    return `<tr class="pb-row pb-section-row" data-page="${page}" data-group="${currentGroupId}" data-expanded="0">` +
+                        `<td colspan="${colCount}"><button type="button" class="pb-section-toggle" data-view="${escapeHtml(v.id)}" data-group="${currentGroupId}">` +
+                        `<span class="pb-section-arrow">&#9656;</span> ${escapeHtml(label)}${countTxt}</button></td></tr>`;
+                }
+                const groupAttr = currentGroupId ? ` data-group="${currentGroupId}" class="pb-row pb-groupdata" style="display:none"` : ' class="pb-row"';
+                return `<tr${groupAttr} data-page="${page}">${(cells || []).map((c) => `<td>${escapeHtml(c)}</td>`).join('')}</tr>`;
+            }).join('\n');
+
+            const headHtml = v.headers.map((h) => `<th>${escapeHtml(h)}</th>`).join('');
+            const hasGroups = groupCount > 0;
+
+            return `
+    <div class="pb-view-panel" data-view="${escapeHtml(v.id)}" style="${idx === 0 ? '' : 'display:none'}">
+        <div class="pb-toolbar">
+            <input class="pb-search-box pb-view-search" data-view="${escapeHtml(v.id)}" type="text" placeholder="Search by product code…" autocomplete="off">
+            <span class="pb-chip">${escapeHtml(v.rowCount != null ? v.rowCount : rows.length)} rows${hasGroups ? ` &middot; ${groupCount} groups` : ''}</span>
+            ${hasGroups ? `
+            <button type="button" class="pb-page-btn pb-group-expand-all" data-view="${escapeHtml(v.id)}">Expand all</button>
+            <button type="button" class="pb-page-btn pb-group-collapse-all" data-view="${escapeHtml(v.id)}">Collapse all</button>` : ''}
+        </div>
+        <div class="pb-table-wrap">
+            <table class="pb-table pb-view-table" data-view="${escapeHtml(v.id)}">
+                <thead><tr>${headHtml}</tr></thead>
+                <tbody>
+                    ${rowsHtml || `<tr><td colspan="${colCount}" class="pb-empty-msg">No data to display for this selection.</td></tr>`}
+                </tbody>
+            </table>
+        </div>
+        ${isMain ? `
+        <div class="pb-pagination pb-view-pagination" data-view="${escapeHtml(v.id)}">
+            <button type="button" class="pb-page-btn pb-view-prev" data-view="${escapeHtml(v.id)}">&#8249; Prev</button>
+            <span class="pb-view-pageinfo" data-view="${escapeHtml(v.id)}">Page 1 of ${totalPages}</span>
+            <button type="button" class="pb-page-btn pb-view-next" data-view="${escapeHtml(v.id)}">Next &#8250;</button>
+        </div>` : ''}
+    </div>`;
+        }).join('\n');
+
+        const metaLinesHtml = (previewData.metaLines || [])
+            .map((l) => `<div class="pb-meta-line">${escapeHtml(l)}</div>`).join('');
+
+        return `
+<div id="pb-preview-root">
+<style>${PREVIEW_CSS}${TAB_CSS}</style>
+    <div class="pb-topbar">
+        <div>
+            <div class="pb-report-title">${escapeHtml(previewData.title || entry.name)}</div>
+            <div class="pb-report-sub">${escapeHtml(previewData.prebookName || '')}</div>
+        </div>
+    </div>
+
+    ${metaLinesHtml ? `<div class="pb-meta-block">${metaLinesHtml}</div>` : ''}
+
+    <div class="pb-download-bar">
+        <span class="pb-download-label">Download this view:</span>
+        ${downloadButtons || '<span class="pb-muted">No downloadable formats configured for this report.</span>'}
+    </div>
+
+    <div class="pb-tabbar">${tabButtonsHtml}</div>
+
+    ${panelsHtml}
+
+    <div class="pb-footer-note">Preebook Reports &middot; embedded preview</div>
+</div>
+<script>
+(function () {
+    var root = document.getElementById('pb-preview-root');
+    if (!root) return;
+    var pageState = {};
+
+    function getRows(viewId) {
+        return root.querySelectorAll('.pb-view-table[data-view="' + viewId + '"] tbody tr[data-page]');
+    }
+
+    function applyPage(viewId, page) {
+        var table = root.querySelector('.pb-view-table[data-view="' + viewId + '"]');
+        if (!table) return;
+        var totalPages = Number(table.getAttribute('data-total-pages')) ||
+            (function () {
+                var maxPage = 1;
+                getRows(viewId).forEach(function (tr) {
+                    var p = Number(tr.getAttribute('data-page')) || 1;
+                    if (p > maxPage) maxPage = p;
+                });
+                return maxPage;
+            })();
+        pageState[viewId] = pageState[viewId] || {};
+        pageState[viewId].page = page;
+        getRows(viewId).forEach(function (tr) {
+            tr.style.display = (tr.getAttribute('data-page') === String(page)) ? '' : 'none';
+        });
+        var info = root.querySelector('.pb-view-pageinfo[data-view="' + viewId + '"]');
+        if (info) info.textContent = 'Page ' + page + ' of ' + totalPages;
+        var prev = root.querySelector('.pb-view-prev[data-view="' + viewId + '"]');
+        var next = root.querySelector('.pb-view-next[data-view="' + viewId + '"]');
+        if (prev) prev.disabled = (page <= 1);
+        if (next) next.disabled = (page >= totalPages);
+    }
+
+    root.querySelectorAll('.pb-view-pagination').forEach(function (pag) {
+        var viewId = pag.getAttribute('data-view');
+        applyPage(viewId, 1);
+    });
+
+    root.querySelectorAll('.pb-view-prev').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var viewId = btn.getAttribute('data-view');
+            var cur = (pageState[viewId] && pageState[viewId].page) || 1;
+            if (cur > 1) applyPage(viewId, cur - 1);
+        });
+    });
+    root.querySelectorAll('.pb-view-next').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var viewId = btn.getAttribute('data-view');
+            var cur = (pageState[viewId] && pageState[viewId].page) || 1;
+            var info = root.querySelector('.pb-view-pageinfo[data-view="' + viewId + '"]');
+            var totalPages = info ? Number(info.textContent.replace(/^.*of\\s*/, '')) : 1;
+            if (cur < totalPages) applyPage(viewId, cur + 1);
+        });
+    });
+
+    // ── Grupos colapsables (vistas CATEGORY/VENDOR) ─────────────────────────
+    // Cada header de sección arranca colapsado (data-expanded="0" en el propio
+    // <tr>); togglear muestra/oculta sus filas .pb-groupdata[data-group=X].
+    function setGroupExpanded(viewId, groupId, expanded) {
+        var sectionRow = root.querySelector('.pb-section-row[data-group="' + groupId + '"]');
+        if (!sectionRow) return;
+        sectionRow.setAttribute('data-expanded', expanded ? '1' : '0');
+        var arrow = sectionRow.querySelector('.pb-section-arrow');
+        if (arrow) arrow.innerHTML = expanded ? '&#9662;' : '&#9656;';
+        root.querySelectorAll('.pb-groupdata[data-group="' + groupId + '"]').forEach(function (tr) {
+            tr.style.display = expanded ? '' : 'none';
+        });
+    }
+
+    // Restaura la visibilidad de cada grupo según su último estado conocido
+    // (data-expanded) — usado al limpiar el buscador en vistas agrupadas.
+    function restoreGroupState(viewId) {
+        root.querySelectorAll('.pb-view-table[data-view="' + viewId + '"] .pb-section-row').forEach(function (sec) {
+            sec.style.display = '';
+            var groupId = sec.getAttribute('data-group');
+            var expanded = sec.getAttribute('data-expanded') === '1';
+            root.querySelectorAll('.pb-groupdata[data-group="' + groupId + '"]').forEach(function (tr) {
+                tr.style.display = expanded ? '' : 'none';
+            });
+        });
+    }
+
+    root.querySelectorAll('.pb-section-toggle').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var viewId = btn.getAttribute('data-view');
+            var groupId = btn.getAttribute('data-group');
+            var sectionRow = root.querySelector('.pb-section-row[data-group="' + groupId + '"]');
+            var expanded = sectionRow && sectionRow.getAttribute('data-expanded') === '1';
+            setGroupExpanded(viewId, groupId, !expanded);
+        });
+    });
+
+    root.querySelectorAll('.pb-group-expand-all').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var viewId = btn.getAttribute('data-view');
+            root.querySelectorAll('.pb-view-table[data-view="' + viewId + '"] .pb-section-row').forEach(function (sec) {
+                setGroupExpanded(viewId, sec.getAttribute('data-group'), true);
+            });
+        });
+    });
+    root.querySelectorAll('.pb-group-collapse-all').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var viewId = btn.getAttribute('data-view');
+            root.querySelectorAll('.pb-view-table[data-view="' + viewId + '"] .pb-section-row').forEach(function (sec) {
+                setGroupExpanded(viewId, sec.getAttribute('data-group'), false);
+            });
+        });
+    });
+
+    // Search por vista: filtra por PRODUCT CODE (2da columna, índice 1); las
+    // filas de sección (pb-section-row) quedan siempre visibles y el collapse
+    // se bypassea mientras se busca (se muestra cualquier fila que matchee,
+    // sin importar si su grupo está colapsado). Al limpiar el buscador: vista
+    // MAIN vuelve a su página actual; vistas agrupadas restauran el estado
+    // expandido/colapsado de cada grupo (restoreGroupState).
+    root.querySelectorAll('.pb-view-search').forEach(function (input) {
+        var viewId = input.getAttribute('data-view');
+        var isGrouped = !!root.querySelector('.pb-view-table[data-view="' + viewId + '"] .pb-section-row');
+        input.addEventListener('input', function () {
+            var q = input.value.trim().toLowerCase();
+            var pagination = root.querySelector('.pb-view-pagination[data-view="' + viewId + '"]');
+            if (!q) {
+                if (pagination) pagination.style.display = '';
+                if (isGrouped) {
+                    restoreGroupState(viewId);
+                } else {
+                    var cur = (pageState[viewId] && pageState[viewId].page) || 1;
+                    applyPage(viewId, cur);
+                }
+                return;
+            }
+            if (pagination) pagination.style.display = 'none';
+            getRows(viewId).forEach(function (tr) {
+                if (tr.classList.contains('pb-section-row')) { tr.style.display = ''; return; }
+                var secondCell = tr.children[1];
+                var text = secondCell ? secondCell.textContent.toLowerCase() : '';
+                tr.style.display = (text.indexOf(q) !== -1) ? '' : 'none';
+            });
+        });
+    });
+
+    window.pbSwitchView = function (viewId) {
+        root.querySelectorAll('.pb-view-panel').forEach(function (p) {
+            p.style.display = (p.getAttribute('data-view') === viewId) ? '' : 'none';
+        });
+        root.querySelectorAll('.pb-tab-btn').forEach(function (b) {
+            b.classList.toggle('pb-tab-active', b.getAttribute('data-view') === viewId);
+        });
+        window.__pbActiveView = viewId;
+    };
+    window.__pbActiveView = ${views.length ? `'${views[0].id}'` : 'null'};
+
+    // Reusa el form nativo (main_form): setea acción=generate + formato +
+    // vista activa (si la librería declaró un filtro previewChoice "view"), y envía.
+    window.pbDownload = function (formatValue) {
+        var actionEl = document.getElementById('${FLD_ACTION}');
+        var formatEl = document.getElementById('${formatFieldId}');
+        var viewEl = ${viewFieldId ? `document.getElementById('${viewFieldId}')` : 'null'};
+        if (actionEl) actionEl.value = '${ACTION_GENERATE}';
+        if (formatEl) formatEl.value = formatValue;
+        if (viewEl && window.__pbActiveView) viewEl.value = window.__pbActiveView;
+        var f = (typeof document !== 'undefined') ? document.forms['main_form'] : null;
+        if (f && typeof f.submit === 'function') f.submit();
+    };
+})();
+</script>`;
+    };
+
     // CSS del preview embebido, namespaced bajo #pb-preview-root. Paleta neutra
     // + acento índigo, tipografía del sistema (sin CDN externo), header sticky.
     const PREVIEW_CSS = `
@@ -878,6 +1185,37 @@ define([
         #pb-preview-root .pb-page-btn:hover:not(:disabled) { background: #eef0f4; }
         #pb-preview-root .pb-page-btn:disabled { opacity: 0.4; cursor: default; }
         #pb-preview-root .pb-footer-note { margin-top: 12px; font-size: 11px; color: var(--pb-muted); text-align: center; }
+    `;
+
+    // CSS adicional para reportes multi-vista (pestañas) — ver buildTabbedPreviewFragment.
+    const TAB_CSS = `
+        #pb-preview-root .pb-tabbar {
+            display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px;
+        }
+        #pb-preview-root .pb-tab-btn {
+            border: 1px solid var(--pb-border); background: var(--pb-card); color: var(--pb-text);
+            border-radius: 8px 8px 0 0; padding: 8px 16px; font: inherit; font-size: 12.5px;
+            font-weight: 600; cursor: pointer;
+        }
+        #pb-preview-root .pb-tab-btn:hover { background: #eef0f4; }
+        #pb-preview-root .pb-tab-btn.pb-tab-active {
+            background: var(--pb-accent); color: #fff; border-color: var(--pb-accent);
+        }
+        #pb-preview-root .pb-view-panel { margin-top: 4px; }
+        #pb-preview-root tr.pb-section-row td {
+            background: #eef0f4; padding: 0; white-space: normal;
+        }
+        #pb-preview-root .pb-section-toggle {
+            display: block; width: 100%; text-align: left; border: none; background: transparent;
+            cursor: pointer; font: inherit; font-size: 12px; font-weight: 700; color: var(--pb-text);
+            padding: 7px 9px;
+        }
+        #pb-preview-root .pb-section-toggle:hover { background: #e4e7ee; }
+        #pb-preview-root .pb-section-arrow {
+            display: inline-block; width: 12px; color: var(--pb-accent); font-size: 10px;
+        }
+        #pb-preview-root .pb-group-expand-all,
+        #pb-preview-root .pb-group-collapse-all { font-size: 11.5px; padding: 6px 10px; }
     `;
 
     // -----------------------------------------------------------------------

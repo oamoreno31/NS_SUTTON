@@ -77,6 +77,25 @@
 <body size="A4-landscape" footer="nlfooter" footer-height="18px"
       padding="0.4in 0.4in 0.4in 0.4in">
 
+    <#-- Formato numérico defensivo: si el valor no llega como número (null,
+         NaN→null por JSON.stringify, string, etc.) el motor PDF de NetSuite
+         puede renderizar la celda en BLANCO en vez de tirar error — por eso
+         TOTAL UNITS aparecía vacío con ${(v!0)?string(...)} (el "!0" solo
+         cubre "no existe", no "existe pero no es number"). fmtNum/fmtCost
+         chequean explícitamente ?is_number antes de formatear, y fmtCost usa
+         un patrón con 4 decimales fijos (no notación científica — el bug de
+         "7.0E-4" en FOB COST era por no tener ningún ?string y caer al
+         formato "computer" default, que sí usa notación científica para
+         decimales chicos). -->
+    <#function fmtNum n>
+        <#if !n?? || !n?is_number><#return "0"></#if>
+        <#return n?string("#,##0.##")>
+    </#function>
+    <#function fmtCost n>
+        <#if !n?? || !n?is_number><#return "0.0000"></#if>
+        <#return n?string("0.0000")>
+    </#function>
+
     <#-- ===================== BLOQUE DE TÍTULO ===================== -->
     <table class="title-block">
         <tr>
@@ -133,26 +152,27 @@
                         <td>${(row.product!"")?xml}</td>
                         <td>${(row.description!"")?xml}</td>
                         <td>${(row.type!"")?xml}</td>
-                        <td class="ctr">${(row.num_recipes)!0}</td>
+                        <td class="ctr">${fmtNum(row.num_recipes)}</td>
 
                         <#if (row.recipes?size > 0)>
                             <#assign r0 = row.recipes[0]>
                             <td>${(r0.recipe_code!"")?xml}<#if (r0.recipedescription!"")?has_content> - ${(r0.recipedescription!"")?xml}</#if></td>
                             <td>${(r0.customer_code!"")?xml}</td>
                             <td>${(r0.customer_name!"")?xml}</td>
-                            <#-- #,##0.## = separador de miles, fácil lectura (TOTAL UNITS/+ -/PO QTY/PO RECEIVED) -->
-                            <td class="num">${((row.totalUnits)!0)?string("#,##0.##")}</td>
+                            <#-- fmtNum: separador de miles + fallback defensivo a "0" si el valor
+                                 no llega como number (ver comentario junto a fmtNum/fmtCost arriba) -->
+                            <td class="num">${fmtNum(row.totalUnits)}</td>
                             <#-- "+ -" = LOC1 OH UNITS + PO QTY - TOTAL UNITS (igual que el Excel) -->
-                            <td class="num">${((row.plus_minus)!0)?string("#,##0.##")}</td>
-                            <td class="num">${(row.fob_cost)!0}</td>
-                            <td class="num">${(row.landed_cost)!0}</td>
-                            <td class="num">${(row.loc_1_oh)!0}</td>
-                            <td class="num">${(row.loc_2_oh)!0}</td>
+                            <td class="num">${fmtNum(row.plus_minus)}</td>
+                            <td class="num">${fmtCost(row.fob_cost)}</td>
+                            <td class="num">${fmtCost(row.landed_cost)}</td>
+                            <td class="num">${fmtNum(row.loc_1_oh)}</td>
+                            <td class="num">${fmtNum(row.loc_2_oh)}</td>
                             <#-- OJO: orden espejo del Excel. Bajo "PO QTY" va po_received y
                                  bajo "PO RECEIVED" va po_qty. Para corregir, intercambiar las
                                  dos celdas siguientes. -->
-                            <td class="num">${((row.po_received)!0)?string("#,##0.##")}</td>
-                            <td class="num">${((row.po_qty)!0)?string("#,##0.##")}</td>
+                            <td class="num">${fmtNum(row.po_received)}</td>
+                            <td class="num">${fmtNum(row.po_qty)}</td>
                             <td>&nbsp;</td><#-- PREP PRODUCTION (TBD) -->
                         <#else>
                             <#-- Item sin recetas: 12 columnas en blanco -->
