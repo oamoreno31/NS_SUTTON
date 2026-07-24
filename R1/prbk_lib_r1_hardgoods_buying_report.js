@@ -581,7 +581,9 @@ define([
      *   Si TOTAL UNITS = 0, el ítem se omite del reporte.
      * PO QTY / PO RECEIVED = de líneas de PO con custbody_sgp_report_id = este Prebook.
      * LOC1/LOC2 OH UNITS = inventario inicial del Prebook (customrecord_bc_prebookbeginninginvline,
-     *   filtrado por customrecord_bc_preebookbeginninginv.custrecordprebook), misma cantidad en ambas.
+     *   filtrado por customrecord_bc_preebookbeginninginv.custrecordprebook). LOC1 desde
+     *   custrecord_bc_prebbokbegninvq, LOC2 desde custrecord_bc_prebbokbegninvq_lc2 (campos
+     *   independientes en la misma línea).
      * "+ -" = LOC1 OH UNITS + PO QTY - TOTAL UNITS.
      * CAT = custitem_sgp_category.custrecord_sgp_printing_prefix.
      * FOB COST / LANDED COST redondeados a 4 decimales.
@@ -608,6 +610,7 @@ define([
                     itm.custitem_sgp_last_purchase_price       AS fob_cost,
                     itm.custitem_bc_lastpurchasepricewithoutla AS landed_cost,
                     catprefix.custrecord_sgp_printing_prefix   AS category_code,
+                    catprefix.custrecord_sgp_categoty_printing_seq AS printing_seq,
                     cat.name                                   AS category_name
                 FROM
                     item itm
@@ -735,15 +738,17 @@ define([
                 `Explosión 2 niveles, ya filtrada en SQL (activos + rango CURRENT [${currentStart} - ${currentEnd}]): ${totalComponentRows} líneas, ${bomIds.length} BOMs`);
 
             // ── 3. Inventario inicial del Prebook (LOC1/LOC2 OH UNITS) ─────
-            //      Misma cantidad para ambas columnas (no hay desglose por
-            //      ubicación en el registro origen). Línea sin cantidad = 0.
+            //      LOC1 y LOC2 son campos independientes en la misma línea
+            //      (custrecord_bc_prebbokbegninvq / custrecord_bc_prebbokbegninvq_lc2).
+            //      Línea sin cantidad = 0.
             phase = '3-inventario inicial (LOC1/LOC2)';
-            const invByItem = {};   // itemId → quantity
+            const invByItem = {};   // itemId → { loc1, loc2 }
             chunkIds(hardgoodsItemIds, 1000).forEach((inList) => {
                 runSuiteQLAll(`
                     SELECT
                         ln.custrecord_bc_prebookbeginv_item AS item_id,
-                        SUM(ln.custrecord_bc_prebbokbegninvq) AS quantity
+                        SUM(ln.custrecord_bc_prebbokbegninvq) AS quantity_loc1,
+                        SUM(ln.custrecord_bc_prebbokbegninvq_lc2) AS quantity_loc2
                     FROM customrecord_bc_prebookbeginninginvline ln
                     INNER JOIN customrecord_bc_preebookbeginninginv bg
                         ON bg.id = ln.custrecord_bc_prebookbinv2
@@ -752,7 +757,10 @@ define([
                       AND ln.custrecord_bc_prebookbeginv_item IN (${inList})
                     GROUP BY ln.custrecord_bc_prebookbeginv_item
                 `, [prebookId]).forEach((r) => {
-                    invByItem[String(r.item_id)] = Number(r.quantity) || 0;
+                    invByItem[String(r.item_id)] = {
+                        loc1: Number(r.quantity_loc1) || 0,
+                        loc2: Number(r.quantity_loc2) || 0
+                    };
                 });
             });
 
@@ -913,21 +921,24 @@ define([
                 if (!totalUnits) return;
 
                 const po = poByItem[itemId] || { po_qty: 0, po_received: 0 };
-                const onHandQty = invByItem[itemId] || 0;
+                const inv = invByItem[itemId] || { loc1: 0, loc2: 0 };
+                const onHandQty = inv.loc1;
                 const plusMinus = onHandQty + po.po_qty - totalUnits; // "+ -": LOC1 + PO QTY - TOTAL UNITS
 
                 rows.push({
                     componentItemId: itemId,
                     cat: it.category_code || it.category_name || '',
+                    // Orden del reporte: custrecord_sgp_categoty_printing_seq (null → al final).
+                    categorySeq: isEmptyValue(it.printing_seq) ? null : Number(it.printing_seq),
                     product: it.item_name || '',
                     description: it.description || '',
                     type: mapItemType(it.item_type),
                     // Máximo 4 decimales.
                     fob_cost: Number((Number(it.fob_cost) || 0).toFixed(4)),
                     landed_cost: Number((Number(it.landed_cost) || 0).toFixed(4)),
-                    // Mismo valor en ambas: el inventario inicial del Prebook no distingue ubicación.
-                    loc_1_oh: onHandQty,
-                    loc_2_oh: onHandQty,
+                    // LOC1 y LOC2 desde campos independientes (fase 3).
+                    loc_1_oh: inv.loc1,
+                    loc_2_oh: inv.loc2,
                     plus_minus: plusMinus,
                     po_qty: po.po_qty,
                     po_received: po.po_received,
@@ -937,10 +948,12 @@ define([
                 });
             });
 
-            // Más recetas primero
+            // Orden del reporte: Category Sequence (custrecord_sgp_categoty_printing_seq,
+            // ascendente, sin valor → al final) y luego Product Code ascendente.
             rows.sort((a, b) => {
-                if (a.num_recipes > b.num_recipes) return -1;
-                if (a.num_recipes < b.num_recipes) return 1;
+                const seqA = a.categorySeq == null ? Number.MAX_SAFE_INTEGER : a.categorySeq;
+                const seqB = b.categorySeq == null ? Number.MAX_SAFE_INTEGER : b.categorySeq;
+                if (seqA !== seqB) return seqA - seqB;
                 return String(a.product).localeCompare(String(b.product));
             });
 

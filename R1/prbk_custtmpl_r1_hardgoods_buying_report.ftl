@@ -77,23 +77,19 @@
 <body size="A4-landscape" footer="nlfooter" footer-height="18px"
       padding="0.4in 0.4in 0.4in 0.4in">
 
-    <#-- Formato numérico defensivo: si el valor no llega como número (null,
-         NaN→null por JSON.stringify, string, etc.) el motor PDF de NetSuite
-         puede renderizar la celda en BLANCO en vez de tirar error — por eso
-         TOTAL UNITS aparecía vacío con ${(v!0)?string(...)} (el "!0" solo
-         cubre "no existe", no "existe pero no es number"). fmtNum/fmtCost
-         chequean explícitamente ?is_number antes de formatear, y fmtCost usa
-         un patrón con 4 decimales fijos (no notación científica — el bug de
-         "7.0E-4" en FOB COST era por no tener ningún ?string y caer al
-         formato "computer" default, que sí usa notación científica para
-         decimales chicos). -->
+    <#-- 2026-07-24: se sacó el formateo con ?string/?is_number — dejaba las
+         celdas en 0 o en blanco cuando el valor no calzaba exactamente con
+         lo que FreeMarker espera como "number" (aunque llegara bien desde
+         JS). Ahora se imprime el valor tal cual llega del JSON (crearPDF).
+         fmtNum/fmtCost quedan solo como pass-through (no tocan el valor) —
+         se dejan los nombres/llamados para no reescribir cada celda. Si se
+         necesita separador de miles o decimales fijos, formatear en JS
+         antes de armar el JSON, no acá. -->
     <#function fmtNum n>
-        <#if !n?? || !n?is_number><#return "0"></#if>
-        <#return n?string("#,##0.##")>
+        <#return n!"">
     </#function>
     <#function fmtCost n>
-        <#if !n?? || !n?is_number><#return "0.0000"></#if>
-        <#return n?string("0.0000")>
+        <#return n!"">
     </#function>
 
     <#-- ===================== BLOQUE DE TÍTULO ===================== -->
@@ -159,8 +155,6 @@
                             <td>${(r0.recipe_code!"")?xml}<#if (r0.recipedescription!"")?has_content> - ${(r0.recipedescription!"")?xml}</#if></td>
                             <td>${(r0.customer_code!"")?xml}</td>
                             <td>${(r0.customer_name!"")?xml}</td>
-                            <#-- fmtNum: separador de miles + fallback defensivo a "0" si el valor
-                                 no llega como number (ver comentario junto a fmtNum/fmtCost arriba) -->
                             <td class="num">${fmtNum(row.totalUnits)}</td>
                             <#-- "+ -" = LOC1 OH UNITS + PO QTY - TOTAL UNITS (igual que el Excel) -->
                             <td class="num">${fmtNum(row.plus_minus)}</td>
