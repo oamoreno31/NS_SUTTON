@@ -414,7 +414,7 @@ define([
                         br.id  AS revision_id,
                         CASE WHEN UPPER(comp.itemsource) IN ('WORK_ORDER', 'PHANTOM')
                              THEN subcomp.item ELSE comp.item END AS item_id,
-                        (NVL(comp.bomquantity, 0) * NVL(subcomp.bomquantity, 1)) AS bom_quantity
+                        (NVL(comp.bomquantity, 1) * NVL(subcomp.bomquantity, 1)) AS bom_quantity
                     FROM bom b
                     INNER JOIN itemAssemblyItemBom iaib ON iaib.billofmaterials = b.id
                     INNER JOIN bomRevisionBomMap map ON map.billofmaterials = b.id

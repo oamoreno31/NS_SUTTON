@@ -1,18 +1,6 @@
 /**
  * @NApiVersion 2.1
  * @NScriptType Suitelet
- *
- * SUITELET SHELL — Cascarón dinámico para reportes del Preebook.
- *
- * Arquitectura plugin/registry: este Suitelet NO contiene lógica de reportes.
- * El catálogo vive en `customrecord_sgp_rpt_registry`; cada renglón apunta a
- * una librería (campo libpath) que implementa { getMetadata,
- * getFilterDefinitions, generate, getPreviewData? }. El shell lee el
- * catálogo, pinta el dropdown "Report", pinta los filtros de la librería
- * elegida, y al enviar llama a lib.generate(filterValues).
- *
- * Nuevo reporte: crear su librería (ver prbk_lib_template.js) + un registro
- * en customrecord_sgp_rpt_registry. No requiere tocar este Suitelet.
  */
 define([
     'N/log',
@@ -21,10 +9,6 @@ define([
     'N/runtime',
     'N/url'
 ], (log, serverWidget, search, runtime, url) => {
-
-    // -----------------------------------------------------------------------
-    // Constantes
-    // -----------------------------------------------------------------------
 
     const REGISTRY_RECORD = 'customrecord_sgp_rpt_registry';
     const REGISTRY_FIELDS = {
@@ -36,22 +20,13 @@ define([
         DESCRIPTION: 'custrecord_sgp_rpt_description'
     };
 
-    // IDs de campos internos del form
     const FLD_REPORT = 'custpage_report';
-    const FLD_ACTION = 'custpage_action';        // 'load_filters' | 'preview' | 'generate'
-    const FLD_FILTER_PREFIX = 'custpage_f_';     // prefijo para campos de filtros dinámicos
+    const FLD_ACTION = 'custpage_action';
+    const FLD_FILTER_PREFIX = 'custpage_f_';
 
     const ACTION_LOAD_FILTERS = 'load_filters';
     const ACTION_GENERATE     = 'generate';
     const ACTION_PREVIEW      = 'preview';
-
-    // Convención: filtros con `previewChoice: true` (ej. formato Excel/PDF) NO
-    // se pintan en el form cuando la librería soporta preview — se eligen desde
-    // los botones Download Excel/PDF del preview. Ver renderLibrarySection/buildPreviewFragment.
-
-    // -----------------------------------------------------------------------
-    // Entry point
-    // -----------------------------------------------------------------------
 
     const onRequest = (ctx) => {
         try {
@@ -70,7 +45,6 @@ define([
             const selectedReportCode = (params[FLD_REPORT] || '').trim();
             const action = (params[FLD_ACTION] || ACTION_LOAD_FILTERS).trim();
 
-            // GET inicial o sin reporte seleccionado: pintar form básico
             if (!selectedReportCode) {
                 renderForm(ctx, reports, null, null, params);
                 return;
@@ -85,7 +59,6 @@ define([
                 return;
             }
 
-            // Cargar la librería dinámicamente vía require asíncrono (patrón SS2.x)
             require([entry.libpath], (lib) => {
                 try {
                     validateLibrary(lib, entry);
@@ -118,10 +91,6 @@ define([
         }
     };
 
-    // -----------------------------------------------------------------------
-    // Carga del catálogo de reportes
-    // -----------------------------------------------------------------------
-
     const loadReportRegistry = () => {
         const out = [];
         try {
@@ -144,7 +113,7 @@ define([
                 paged.fetch({ index: pr.index }).data.forEach((r) => {
                     const code = String(r.getValue({ name: REGISTRY_FIELDS.CODE }) || '').trim();
                     const libpath = String(r.getValue({ name: REGISTRY_FIELDS.LIBPATH }) || '').trim();
-                    if (!code || !libpath) return; // entradas mal configuradas se ignoran
+                    if (!code || !libpath) return;
                     out.push({
                         id: r.id,
                         code: code,
@@ -161,10 +130,6 @@ define([
         return out;
     };
 
-    // -----------------------------------------------------------------------
-    // Validación del contrato de la librería
-    // -----------------------------------------------------------------------
-
     const validateLibrary = (lib, entry) => {
         if (!lib || typeof lib !== 'object') {
             throw new Error(`La librería ${entry.libpath} no exporta un objeto.`);
@@ -180,14 +145,9 @@ define([
         }
     };
 
-    // -----------------------------------------------------------------------
-    // Render del form (modo "selección de reporte" + modo "filtros")
-    // -----------------------------------------------------------------------
-
     const renderForm = (ctx, reports, entry, lib, params, extra) => {
         const form = serverWidget.createForm({ title: 'Preebook Reports' });
 
-        // Client script: refresh server-side al cambiar el dropdown de reporte.
         form.clientScriptModulePath = './prbk_cs_reports_shell.js';
 
         const reportField = form.addField({
@@ -205,8 +165,6 @@ define([
             });
         if (entry) reportField.defaultValue = entry.code;
 
-        // Si la librería implementa getPreviewData(), el flujo pasa por la
-        // pantalla de preview; si no, va directo a generate() (compatibilidad).
         const previewSupported = !!(lib && typeof lib.getPreviewData === 'function');
 
         const actionField = form.addField({
@@ -230,10 +188,6 @@ define([
             form.addSubmitButton({ label: 'Continue' });
         }
 
-        // Preview embebido: INLINEHTML con la tabla del reporte, pintado dentro
-        // de la MISMA página de NetSuite. Los botones Download reusan el form
-        // nativo (custpage_action=generate + custpage_f_<id>=EXCEL|PDF) vía JS,
-        // sin <form> anidado.
         if (showingPreview) {
             const previewFld = form.addField({
                 id: 'custpage_preview_html',
@@ -246,7 +200,6 @@ define([
         ctx.response.writePage(form);
     };
 
-    /** Pinta la sección del reporte: cabecera con descripción + filtros declarados. */
     const renderLibrarySection = (form, entry, lib, params, previewSupported) => {
         const meta = safeCall(() => lib.getMetadata(), {});
         const filters = safeCall(() => lib.getFilterDefinitions(), []) || [];
@@ -259,8 +212,6 @@ define([
         });
         headerFld.defaultValue = headerHtml;
 
-        // Si soporta preview, los filtros `previewChoice` (ej. formato) se
-        // ocultan aquí — se eligen desde los botones de descarga del preview.
         const visibleFilters = previewSupported
             ? filters.filter((def) => !def.previewChoice)
             : filters;
@@ -273,9 +224,9 @@ define([
                 const submittedKey = FLD_FILTER_PREFIX + def.id;
                 const submittedVal = params[submittedKey];
                 if (submittedVal !== undefined && submittedVal !== '') {
-                    try { fld.defaultValue = submittedVal; } catch (e) { /* ignore */ }
+                    try { fld.defaultValue = submittedVal; } catch (e) {}
                 } else if (def.defaultValue !== undefined && def.defaultValue !== null) {
-                    try { fld.defaultValue = def.defaultValue; } catch (e) { /* ignore */ }
+                    try { fld.defaultValue = def.defaultValue; } catch (e) {}
                 }
             });
         } else {
@@ -287,9 +238,6 @@ define([
             noFiltersFld.defaultValue = '<p style="color:#666;margin:8px 0;">This report has no filters.</p>';
         }
 
-        // Campos HIDDEN reales (no INLINE) para los filtros previewChoice (ej.
-        // output_format): fuera de la vista pero parte de main_form, para que
-        // los botones Download del preview los seteen por JS antes de enviar.
         if (previewSupported) {
             filters.filter((def) => def.previewChoice).forEach((def) => {
                 const fieldId = FLD_FILTER_PREFIX + def.id;
@@ -303,13 +251,10 @@ define([
                 hiddenFld.defaultValue = (submittedVal !== undefined && submittedVal !== '')
                     ? submittedVal
                     : (def.defaultValue || '');
-                // Nunca isMandatory=true acá: se llena por JS al hacer clic en
-                // Download. Validación real sigue en handleGenerate().
             });
         }
     };
 
-    /** Convierte una definición de filtro de la librería en un campo de form de NetSuite. */
     const addDynamicField = (form, def) => {
         if (!def || !def.id) return null;
 
@@ -364,7 +309,7 @@ define([
         if (def.helpText) {
             try {
                 fld.setHelpText({ help: String(def.helpText), showInlineForAssistant: false });
-            } catch (e) { /* ignore */ }
+            } catch (e) {}
         }
         if (def.readonly) {
             fld.updateDisplayType({ displayType: serverWidget.FieldDisplayType.INLINE });
@@ -372,10 +317,6 @@ define([
 
         return fld;
     };
-
-    // -----------------------------------------------------------------------
-    // Generate handler
-    // -----------------------------------------------------------------------
 
     const handleGenerate = (ctx, lib, entry, params) => {
         const filters = safeCall(() => lib.getFilterDefinitions(), []) || [];
@@ -434,17 +375,9 @@ define([
         ));
     };
 
-    // -----------------------------------------------------------------------
-    // Preview handler — arma la data y delega en renderForm() para que se
-    // pinte EMBEBIDA en la misma página. Solo si la librería implementa
-    // getPreviewData(); no genera archivo (eso sigue en handleGenerate()).
-    // -----------------------------------------------------------------------
-
     const handlePreview = (ctx, reports, lib, entry, params) => {
         const filters = safeCall(() => lib.getFilterDefinitions(), []) || [];
 
-        // Los filtros previewChoice (ej. formato) no se piden acá: se eligen
-        // en los botones de descarga del preview embebido.
         const filterValues = {};
         filters.forEach((def) => {
             const submitted = params[FLD_FILTER_PREFIX + def.id];
@@ -482,23 +415,13 @@ define([
             ? buildTabbedPreviewFragment(entry, meta, filters, filterValues, previewData)
             : buildPreviewFragment(entry, meta, filters, filterValues, previewData);
 
-        // Repinta el MISMO form y agrega el fragmento de preview como INLINEHTML.
         renderForm(ctx, reports, entry, lib, params, { previewHtml });
     };
 
-    // Filas "padre" por página (sub-filas de receta viajan con su padre, no cuentan).
     const PREVIEW_PAGE_SIZE = 10;
 
-    // A partir de cuántas recetas se colapsan las sub-filas detrás de un toggle.
     const PREVIEW_COLLAPSE_THRESHOLD = 5;
 
-    /**
-     * Normaliza una entrada de previewData.rows a { cells, visibleSubRows, subRows, recipeCount }.
-     * Soporta el formato plano Array<string> (sin sub-filas, ej. R2) y el
-     * jerárquico { cells, visibleSubRows, subRows, recipeCount } (con sub-filas,
-     * ej. R1) — visibleSubRows son siempre visibles (recetas 2-5), subRows son
-     * las que el collapse oculta detrás del toggle (receta 6+).
-     */
     const normalizePreviewRow = (row) => {
         if (Array.isArray(row)) {
             return { cells: row, subRows: [], visibleSubRows: [], recipeCount: null, subTotalUnits: undefined };
@@ -515,19 +438,10 @@ define([
         };
     };
 
-    /**
-     * Construye el fragmento HTML embebido (INLINEHTML) del preview: misma
-     * estructura de columnas que el Excel, con paginación (PREVIEW_PAGE_SIZE),
-     * collapse de sub-filas (PREVIEW_COLLAPSE_THRESHOLD), y botones Download
-     * que reusan el form nativo de NetSuite (ver window.pbDownload). Todo el
-     * CSS/IDs va namespaced bajo #pb-preview-root.
-     */
     const buildPreviewFragment = (entry, meta, filters, filterValues, previewData) => {
         const formatDef = filters.find((def) => def.previewChoice) || null;
         const formatFieldId = formatDef ? (FLD_FILTER_PREFIX + formatDef.id) : '';
 
-        // Un botón por opción del filtro previewChoice, acotado a los formatos
-        // que la librería declara soportar (getMetadata().formats).
         const supportedFormats = (Array.isArray(meta.formats) ? meta.formats : [])
             .map((f) => String(f).toUpperCase());
         const formatOptions = (formatDef && Array.isArray(formatDef.options)) ? formatDef.options : [];
@@ -544,23 +458,10 @@ define([
         const totalPages = Math.max(1, Math.ceil(rows.length / PREVIEW_PAGE_SIZE));
         const colCount = previewData.headers.length;
 
-        // Columna opcional "SUB TOTAL UNITS": solo aparece si la librería expone
-        // subTotalUnits en al menos una fila/sub-fila (ej. R1). Puramente visual,
-        // oculta por defecto detrás del checkbox "See all sub total units" —
-        // no participa en ningún cálculo del reporte.
-        // const hasSubTotalUnits = rows.some((row) =>
-        //     row.subTotalUnits !== undefined ||
-        //     row.subRows.some((sr) => sr.subTotalUnits !== undefined) ||
-        //     row.visibleSubRows.some((sr) => sr.subTotalUnits !== undefined));
         const hasSubTotalUnits = 0;
         const effectiveColCount = colCount + (hasSubTotalUnits ? 1 : 0);
         const subTotalCell = (v) => `<td class="pb-subtotal-col">${escapeHtml(v != null ? v : '')}</td>`;
 
-        // Cada fila "padre" lleva data-page + data-group; TODAS sus sub-filas
-        // (visibles o colapsables) comparten el mismo data-group para que el
-        // Search pueda mostrar padre + sub-filas como unidad (ver <script>).
-        // visibleSubRows (recetas 2-5) SIEMPRE se pintan; subRows (receta 6+)
-        // solo si recipeCount supera el umbral, detrás del toggle collapse.
         let bodyRowsHtml = '';
         rows.forEach((row, idx) => {
             const page = Math.floor(idx / PREVIEW_PAGE_SIZE) + 1;
@@ -588,8 +489,6 @@ define([
                     bodyRowsHtml += `<tr class="pb-row pb-subrow pb-collapsible" data-page="${page}" data-group="${groupId}" style="display:none">${sr.cells.map((c) => `<td>${escapeHtml(c)}</td>`).join('')}${srSubTotalHtml}</tr>\n`;
                 });
             } else if (row.subRows.length > 0) {
-                // Defensivo: subRows sin collapse activo (librería que no siga el
-                // límite de 5) se muestran igual, sin toggle.
                 row.subRows.forEach((sr) => {
                     const srSubTotalHtml = hasSubTotalUnits ? subTotalCell(sr.subTotalUnits) : '';
                     bodyRowsHtml += `<tr class="pb-row pb-subrow" data-page="${page}" data-group="${groupId}">${sr.cells.map((c) => `<td>${escapeHtml(c)}</td>`).join('')}${srSubTotalHtml}</tr>\n`;
@@ -653,8 +552,6 @@ define([
 
     function isExpanded(group) {
         var t = root.querySelector('.pb-toggle-row[data-group="' + group + '"]');
-        // Sin toggle-row para este grupo => no es colapsable (recipeCount bajo
-        // el umbral); sus sub-filas se consideran "siempre expandidas".
         if (!t) return true;
         return t.getAttribute('data-expanded') === '1';
     }
@@ -691,8 +588,6 @@ define([
             var plural = (count === '1') ? '' : 's';
             btn.innerHTML = (wasExpanded ? '&#9656; View ' : '&#9662; Hide ') + count + ' more recipe' + plural;
             if (searching) {
-                // applyPage() no corre durante el filtro; actualizar la visibilidad
-                // de este grupo directamente para que el toggle siga funcionando.
                 root.querySelectorAll('.pb-collapsible[data-group="' + group + '"]').forEach(function (sr) {
                     sr.style.display = nowExpanded ? '' : 'none';
                 });
@@ -702,8 +597,6 @@ define([
         });
     });
 
-    // Checkbox "See all sub total units": muestra/oculta la columna extra
-    // vía clase CSS en el root — puramente visual, no toca paginación/search.
     var subtotalToggle = document.getElementById('pbSubTotalToggle');
     if (subtotalToggle) {
         subtotalToggle.addEventListener('change', function () {
@@ -731,9 +624,6 @@ define([
             searching = true;
             if (pagination) pagination.style.display = 'none';
 
-            // Match SOLO contra la 2da columna (índice 1, ej. product code) de
-            // filas padre — nunca de sub-filas. Muestra la fila padre COMPLETA
-            // junto con todas sus sub-filas (mismo data-group) como unidad.
             var matchedGroups = {};
             allRows.forEach(function (tr) {
                 if (!tr.classList.contains('pb-row') || tr.classList.contains('pb-subrow')) return;
@@ -742,9 +632,6 @@ define([
                 if (text.indexOf(q) !== -1) matchedGroups[tr.getAttribute('data-group')] = true;
             });
 
-            // El collapse se respeta durante el filtro: el toggle-row se muestra
-            // si su grupo matcheó (no se oculta como antes), y las filas
-            // pb-collapsible solo aparecen si además el grupo está expandido.
             allRows.forEach(function (tr) {
                 var group = tr.getAttribute('data-group');
                 var groupMatched = !!(group && matchedGroups[group]);
@@ -757,15 +644,19 @@ define([
         });
     }
 
-    // Reusa el form nativo de NetSuite (main_form): setea acción=generate +
-    // formato elegido, y envía — handleGenerate() del server no cambia.
     window.pbDownload = function (formatValue) {
         var actionEl = document.getElementById('${FLD_ACTION}');
         var formatEl = document.getElementById('${formatFieldId}');
+        var f = (typeof document !== 'undefined') ? document.forms['main_form'] : null;
         if (actionEl) actionEl.value = '${ACTION_GENERATE}';
         if (formatEl) formatEl.value = formatValue;
-        var f = (typeof document !== 'undefined') ? document.forms['main_form'] : null;
-        if (f && typeof f.submit === 'function') f.submit();
+        if (f) {
+            var prevTarget = f.target;
+            f.target = '_blank';
+            if (typeof f.submit === 'function') f.submit();
+            f.target = prevTarget || '';
+        }
+        if (actionEl) actionEl.value = '${ACTION_PREVIEW}';
     };
 
     applyPage(1);
@@ -773,24 +664,9 @@ define([
 </script>`;
     };
 
-    // Marcadores que una librería puede usar en la 1ra celda de una fila de
-    // previewData para pedir que se pinte como fila de sección colapsable
-    // (colspan, toggle, conteo de items) en vez de fila de datos — ver R3
-    // (groupedToPreviewRows). Formato: SECTION_MARKER + label + COUNT_MARKER + n.
-    // Deben coincidir con SECTION_MARKER/COUNT_MARKER en la librería.
     const SECTION_MARKER = '§SECTION§';
     const COUNT_MARKER = '§N§';
 
-    /**
-     * Construye el fragmento HTML embebido (INLINEHTML) para reportes con
-     * MÚLTIPLES vistas (previewData.views), ej. R3: Main / By Category / By
-     * Vendor. Pestañas client-side (una sola vista visible a la vez); la vista
-     * "MAIN" (1ra por convención) lleva paginación + search, el resto (vistas
-     * agrupadas) se muestran completas con scroll + search (sin paginación —
-     * cortar por página en medio de un grupo sería confuso). Los botones
-     * Download setean output_format Y view (según la pestaña activa) antes de
-     * enviar el form nativo — igual mecanismo que buildPreviewFragment.
-     */
     const buildTabbedPreviewFragment = (entry, meta, filters, filterValues, previewData) => {
         const formatDef = filters.find((def) => def.id === 'output_format' && def.previewChoice) || null;
         const formatFieldId = formatDef ? (FLD_FILTER_PREFIX + formatDef.id) : '';
@@ -822,10 +698,6 @@ define([
             const isMain = idx === 0;
             const totalPages = isMain ? Math.max(1, Math.ceil(rows.length / PREVIEW_PAGE_SIZE_TAB)) : 1;
 
-            // Vistas agrupadas (CATEGORY/VENDOR): cada fila de sección (marcador
-            // SECTION_MARKER+label+COUNT_MARKER+n) se pinta como header colapsable
-            // (arranca colapsado); sus filas de datos siguientes quedan tagged con
-            // data-group y ocultas hasta que se abra el toggle o se busque algo.
             let groupIdx = -1;
             let currentGroupId = null;
             let groupCount = 0;
@@ -962,9 +834,6 @@ define([
         });
     });
 
-    // ── Grupos colapsables (vistas CATEGORY/VENDOR) ─────────────────────────
-    // Cada header de sección arranca colapsado (data-expanded="0" en el propio
-    // <tr>); togglear muestra/oculta sus filas .pb-groupdata[data-group=X].
     function setGroupExpanded(viewId, groupId, expanded) {
         var sectionRow = root.querySelector('.pb-section-row[data-group="' + groupId + '"]');
         if (!sectionRow) return;
@@ -976,8 +845,6 @@ define([
         });
     }
 
-    // Restaura la visibilidad de cada grupo según su último estado conocido
-    // (data-expanded) — usado al limpiar el buscador en vistas agrupadas.
     function restoreGroupState(viewId) {
         root.querySelectorAll('.pb-view-table[data-view="' + viewId + '"] .pb-section-row').forEach(function (sec) {
             sec.style.display = '';
@@ -1016,12 +883,6 @@ define([
         });
     });
 
-    // Search por vista: filtra por PRODUCT CODE (2da columna, índice 1); las
-    // filas de sección (pb-section-row) quedan siempre visibles y el collapse
-    // se bypassea mientras se busca (se muestra cualquier fila que matchee,
-    // sin importar si su grupo está colapsado). Al limpiar el buscador: vista
-    // MAIN vuelve a su página actual; vistas agrupadas restauran el estado
-    // expandido/colapsado de cada grupo (restoreGroupState).
     root.querySelectorAll('.pb-view-search').forEach(function (input) {
         var viewId = input.getAttribute('data-view');
         var isGrouped = !!root.querySelector('.pb-view-table[data-view="' + viewId + '"] .pb-section-row');
@@ -1059,24 +920,26 @@ define([
     };
     window.__pbActiveView = ${views.length ? `'${views[0].id}'` : 'null'};
 
-    // Reusa el form nativo (main_form): setea acción=generate + formato +
-    // vista activa (si la librería declaró un filtro previewChoice "view"), y envía.
     window.pbDownload = function (formatValue) {
         var actionEl = document.getElementById('${FLD_ACTION}');
         var formatEl = document.getElementById('${formatFieldId}');
         var viewEl = ${viewFieldId ? `document.getElementById('${viewFieldId}')` : 'null'};
+        var f = (typeof document !== 'undefined') ? document.forms['main_form'] : null;
         if (actionEl) actionEl.value = '${ACTION_GENERATE}';
         if (formatEl) formatEl.value = formatValue;
         if (viewEl && window.__pbActiveView) viewEl.value = window.__pbActiveView;
-        var f = (typeof document !== 'undefined') ? document.forms['main_form'] : null;
-        if (f && typeof f.submit === 'function') f.submit();
+        if (f) {
+            var prevTarget = f.target;
+            f.target = '_blank';
+            if (typeof f.submit === 'function') f.submit();
+            f.target = prevTarget || '';
+        }
+        if (actionEl) actionEl.value = '${ACTION_PREVIEW}';
     };
 })();
 </script>`;
     };
 
-    // CSS del preview embebido, namespaced bajo #pb-preview-root. Paleta neutra
-    // + acento índigo, tipografía del sistema (sin CDN externo), header sticky.
     const PREVIEW_CSS = `
         #pb-preview-root {
             --pb-bg: #f4f6f9;
@@ -1187,7 +1050,6 @@ define([
         #pb-preview-root .pb-footer-note { margin-top: 12px; font-size: 11px; color: var(--pb-muted); text-align: center; }
     `;
 
-    // CSS adicional para reportes multi-vista (pestañas) — ver buildTabbedPreviewFragment.
     const TAB_CSS = `
         #pb-preview-root .pb-tabbar {
             display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px;
@@ -1217,10 +1079,6 @@ define([
         #pb-preview-root .pb-group-expand-all,
         #pb-preview-root .pb-group-collapse-all { font-size: 11.5px; padding: 6px 10px; }
     `;
-
-    // -----------------------------------------------------------------------
-    // Utilidades varias
-    // -----------------------------------------------------------------------
 
     const buildHeaderHtml = (entry, meta) => {
         const desc = meta.description || entry.description || '';

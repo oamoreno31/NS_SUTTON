@@ -511,6 +511,8 @@ define([
                 LOWER(cat.name) = 'hardgoods'
                 AND itm.isinactive = 'F'
                 AND cat.isinactive = 'F'
+                AND (catprefix.id IS NULL OR NVL(catprefix.isinactive, 'F') = 'F')
+                AND (subcat.id IS NULL OR NVL(subcat.isinactive, 'F') = 'F')
                 AND (itm.itemid IS NULL OR itm.itemid NOT LIKE '%*%')
             ORDER BY
                 itm.id ASC
@@ -569,6 +571,7 @@ define([
                     LEFT JOIN bomRevision sub_bomRev ON sub_bomRev.id = sub_map.bomrevision AND NVL(sub_bomRev.isinactive, 'F') = 'F'
                     LEFT JOIN bomRevisionComponentMember subcomp ON subcomp.bomrevision = sub_bomRev.id
                     WHERE NVL(b.isinactive, 'F') = 'F'
+                      AND (sub_bom.id IS NULL OR NVL(sub_bom.isinactive, 'F') = 'F')
                       AND (b.name IS NULL OR b.name NOT LIKE '%*%')
                       AND (br.name IS NULL OR br.name NOT LIKE '%*%')
                       AND (
@@ -637,6 +640,7 @@ define([
                     INNER JOIN customrecord_bc_preebookbeginninginv bg
                         ON bg.id = ln.custrecord_bc_prebookbinv2
                     WHERE ln.isinactive = 'F'
+                      AND NVL(bg.isinactive, 'F') = 'F'
                       AND bg.custrecordprebook = ?
                       AND ln.custrecord_bc_prebookbeginv_item IN (${inList})
                     GROUP BY ln.custrecord_bc_prebookbeginv_item
