@@ -1,34 +1,5 @@
 <?xml version="1.0"?>
 <!DOCTYPE pdf PUBLIC "-//big.faceless.org//report" "report-1.1.dtd">
-<#--
-    ============================================================================
-    All Raw Materials Projection Report — Greens (R2)
-    Plantilla FreeMarker / Advanced PDF (BFO) para prbk_lib_r2_greens_projection_report.js
-
-    No existía copia local de este archivo (solo vivía en el File Cabinet de
-    NetSuite) — creada 2026-07-24 a partir del PDF de referencia legacy
-    "WO720.R" (reporte plano, sin agrupar) que Omar compartió. Mismo estilo
-    visual que la vista MAIN de R3 (report-plain): fuente Courier, sin bordes
-    de celda, título con número de página.
-
-    Contrato de datos (inyectado desde crearPDF):
-      record        -> customrecord_sgp_prebook (acceso: ${record.<campo>})
-      data.report   -> Array plano de filas (una por item; el reporte agrega
-                       "para todas las recetas", sin sub-filas ni agrupación)
-      data.headers  -> Array de encabezados (13 columnas, mismo orden que el
-                       Excel: CAT, PRODUCT CODE, PRODUCT DESCRIPTION,
-                       PACK PK/STM, STEMS NEEDED, BUNCHES NEEDED, CASES NEEDED,
-                       QUANTITY ONHAND, UNIT PREP COMP, PO RECVD LOC1,
-                       IN BOUND LOC1, CASES SHORT LOC1, CASES OVER LOC1).
-                       NOTA: el PDF de referencia de Omar solo muestra 11 de
-                       estas 13 columnas (sin PACK PK/STM ni UNIT PREP COMP) —
-                       confirmado explícitamente mantenerlas igual (no son
-                       parte del legacy pero sí del reporte actual).
-      data.metadata -> { prebookId, prebookName, historicalStart, historicalEnd,
-                         currentStart, currentEnd, loc1Label, generatedAt,
-                         generatedAtDisplay, totalRows }
-    ============================================================================
--->
 <#setting number_format="computer">
 <pdf>
 <head>
@@ -50,13 +21,11 @@
             color: #000000;
         }
 
-        /* ── Bloque de título ─────────────────────────────────────────── */
         table.title-block { width: 100%; margin-bottom: 6px; }
         .report-no    { font-size: 9pt; font-weight: bold; }
         .report-title { font-size: 8.5pt; font-weight: bold; }
         .meta-line    { font-size: 7.5pt; }
 
-        /* ── Tabla del reporte: plana, sin bordes de celda (igual al legacy) ── */
         table.report-plain {
             width: 100%;
             border-collapse: collapse;
@@ -80,7 +49,6 @@
         .ctr { text-align: center; }
         .txt { text-align: left; }
 
-        /* ── Footer ───────────────────────────────────────────────────── */
         table.footer-table { width: 100%; font-size: 6pt; color: #555555; }
 
         .empty-msg { font-size: 9pt; font-style: italic; padding-top: 20px; }
@@ -90,7 +58,6 @@
 <body size="A4-landscape" footer="nlfooter" footer-height="18px"
       padding="0.4in 0.4in 0.4in 0.4in">
 
-    <#-- ===================== BLOQUE DE TÍTULO ===================== -->
     <table class="title-block">
         <tr>
             <td width="60%" class="report-no">WO720.R&nbsp;&nbsp;&nbsp;# ${(data.metadata.prebookId!"")?xml}&nbsp;&nbsp;&nbsp;ALL RAW MATERIALS PROJECTION REPORT FOR ALL RECIPES</td>
@@ -104,29 +71,23 @@
         </tr>
     </table>
 
-    <#-- ===================== TABLA DEL REPORTE ==================== -->
     <table class="report-plain">
-        <#-- Anchos de columna (13: CAT, PRODUCT CODE, PRODUCT DESCRIPTION,
-             PACK PK/STM, STEMS NEEDED, BUNCHES NEEDED, CASES NEEDED,
-             QUANTITY ONHAND, UNIT PREP COMP, PO RECVD LOC1, IN BOUND LOC1,
-             CASES SHORT LOC1, CASES OVER LOC1) -->
         <colgroup>
-            <col width="4%"/>   <#-- CAT -->
-            <col width="9%"/>   <#-- PRODUCT CODE -->
-            <col width="19%"/>  <#-- PRODUCT DESCRIPTION -->
-            <col width="7%"/>   <#-- PACK PK/STM -->
-            <col width="8%"/>   <#-- STEMS NEEDED -->
-            <col width="8%"/>   <#-- BUNCHES NEEDED -->
-            <col width="8%"/>   <#-- CASES NEEDED -->
-            <col width="8%"/>   <#-- QUANTITY ONHAND -->
-            <col width="7%"/>   <#-- UNIT PREP COMP -->
-            <col width="7%"/>   <#-- PO RECVD LOC1 -->
-            <col width="7%"/>   <#-- IN BOUND LOC1 -->
-            <col width="8%"/>   <#-- CASES SHORT LOC1 -->
-            <col width="8%"/>   <#-- CASES OVER LOC1 -->
+            <col width="6%"/>
+            <col width="9%"/>
+            <col width="19%"/>
+            <col width="7%"/>
+            <col width="8%"/>
+            <col width="8%"/>
+            <col width="8%"/>
+            <col width="8%"/>
+            <col width="7%"/>
+            <col width="7%"/>
+            <col width="7%"/>
+            <col width="8%"/>
+            <col width="8%"/>
         </colgroup>
 
-        <#-- Encabezados (se repiten en cada página gracias a thead) -->
         <thead>
             <tr>
                 <#list (data.headers)![] as h>

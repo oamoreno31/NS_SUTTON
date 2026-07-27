@@ -1,15 +1,6 @@
 /**
  * @NApiVersion 2.1
  * @NModuleScope Public
- *
- * R2 — ALL RAW MATERIALS PROJECTION REPORT (GREENS)
- * Hermano de prbk_lib_r1_hardgoods_buying_report.js: misma arquitectura, pero
- * solo artículos GREENS, columnas distintas, y loadBomComponents agrega por
- * item "para todas las recetas" (sin sub-filas).
- *
- * Columnas (orden del reporte impreso):
- *   CAT | PRODUCT CODE | PRODUCT DESCRIPTION | STEMS NEEDED | BUNCHES NEEDED |
- *   CASES NEEDED | QUANTY ONHAND | PO RECVD | IN BOUND | CASES SHORT | CASES OVER
  */
 define([
     'N/query',
@@ -22,22 +13,12 @@ define([
     './prbk_lib_reports_common'
 ], (query, search, render, record, log, file, encode, common) => {
 
-    // =========================================================================
-    // CONSTANTS
-    // =========================================================================
+    const LOC1_ID = 1;
+    const LOC1_LABEL = 'LOC1';
 
-    const LOC1_ID = 1;          // Internal ID real de LOC1
-    const LOC1_LABEL = 'LOC1';  // nombre visible de LOC1
-
-    // Nombre del .ftl en el File Cabinet; su ID se resuelve en runtime (findTemplateFileId).
     const GR_TEMPLATE_FILENAME = 'prbk_custtmpl_r2_greens_projection_report.ftl';
 
-    // Límite real de file.create en NetSuite es 10 MB; dejamos margen.
     const MAX_XLS_BYTES = 9.8 * 1024 * 1024;
-
-    // =========================================================================
-    // 1. METADATA
-    // =========================================================================
 
     const getMetadata = () => ({
         id: 'GREENS_PROJECTION',
@@ -46,10 +27,6 @@ define([
             'beginning inventory, POs received, inbound, and case short/over.',
         formats: ['PDF', 'EXCEL']
     });
-
-    // =========================================================================
-    // 2. FILTROS
-    // =========================================================================
 
     const getFilterDefinitions = () => ([
         {
@@ -70,15 +47,9 @@ define([
                 { value: 'PDF', text: 'PDF' }
             ],
             helpText: 'Select the document format to generate (Excel or PDF).',
-            // previewChoice: el shell oculta este campo y lo elige desde los
-            // botones Download Excel/PDF del preview. Ver prbk_sl_reports_shell.js.
             previewChoice: true
         }
     ]);
-
-    // =========================================================================
-    // 3. VALIDACIÓN
-    // =========================================================================
 
     const validateFilters = (values) => {
         if (!values.prebook) {
@@ -94,20 +65,11 @@ define([
         return { valid: true };
     };
 
-    // =========================================================================
-    // 4. GENERATE
-    // =========================================================================
-
-    /**
-     * @param {Object} filterValues - .prebook, .output_format
-     * @returns {Object} { fileObj, contentType, filename }
-     */
     const generate = (filterValues) => {
         const prebookId = String(filterValues.prebook);
         const format = String(filterValues.output_format || 'EXCEL').toUpperCase();
         log.audit('GREENS.generate', `prebook=${prebookId}  format=${format}`);
 
-        // Rango CURRENT filtra las BomRevision vigentes; historical solo para "History: ...".
         const preebookData = search.lookupFields({
             type: 'customrecord_sgp_prebook',
             id: prebookId,
@@ -143,15 +105,6 @@ define([
         return { fileObj: reportExcel, contentType: 'application/vnd.ms-excel', filename: `${baseName}.xls` };
     };
 
-    // =========================================================================
-    // 4b. GET PREVIEW DATA — misma data que crearExcel, en JSON plano para el
-    //     shell. No genera archivo; no toca generate/crearExcel/crearPDF.
-    // =========================================================================
-
-    /**
-     * @param {Object} filterValues - .prebook (output_format se elige en el preview)
-     * @returns {Object} { title, prebookName, metaLines, headers, rows, rowCount }
-     */
     const getPreviewData = (filterValues) => {
         const prebookId = String(filterValues.prebook);
         log.audit('GREENS.getPreviewData', `prebook=${prebookId}`);
@@ -180,7 +133,6 @@ define([
             'BUNCHES NEEDED', 'CASES NEEDED', 'QUANTITY ONHAND', 'UNIT PREP COMP', 'PO RECVD LOC1',
             'IN BOUND LOC1', 'CASES SHORT LOC1', 'CASES OVER LOC1'];
 
-        // Mismo orden de columnas que crearExcel (una fila por item, sin sub-filas).
         const flatRows = rows.map((r) => ([
             safeStr(r.cat), safeStr(r.productCode), safeStr(r.description), safeStr(r.pkstm),
             String(r.stemsNeeded || 0), String(r.bunchesNeeded || 0), String(r.casesNeeded || 0),
@@ -204,13 +156,8 @@ define([
         };
     };
 
-    // =========================================================================
-    // 5. EXCEL
-    // =========================================================================
-
     const crearExcel = (headers, rows, fileName, prebookId, preebookData) => {
         try {
-            // Escapan XML; celdas sin ss:StyleID heredan borde del estilo Default.
             const escapeXml = (v) => isEmptyValue(v) ? '' :
                 String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
             const EMPTY = '<Cell/>';
@@ -252,22 +199,21 @@ define([
                 '<Worksheet ss:Name="Hoja1">\n' +
                 '<Table ss:ExpandedColumnCount="' + (headers.length + 2) + '" ss:ExpandedRowCount="' + (rows.length + 100) + '" x:FullColumns="1"\n' +
                 'x:FullRows="1" ss:DefaultRowHeight="14.4">\n' +
-                '<Column ss:Width="35"/>\n' +     // CAT
-                '<Column ss:Width="60"/>\n' +     // PRODUCT CODE
-                '<Column ss:Width="160"/>\n' +    // PRODUCT DESCRIPTION
-                '<Column ss:Width="60"/>\n' +     // STEMS NEEDED
-                '<Column ss:Width="65"/>\n' +     // BUNCHES NEEDED
-                '<Column ss:Width="60"/>\n' +     // CASES NEEDED
-                '<Column ss:Width="65"/>\n' +     // QUANTY ONHAND
-                '<Column ss:Width="55"/>\n' +     // PO RECVD
-                '<Column ss:Width="55"/>\n' +     // IN BOUND
-                '<Column ss:Width="60"/>\n' +     // CASES SHORT
-                '<Column ss:Width="60"/>\n' +     // CASES OVER
+                '<Column ss:Width="45"/>\n' +
+                '<Column ss:Width="60"/>\n' +
+                '<Column ss:Width="160"/>\n' +
+                '<Column ss:Width="60"/>\n' +
+                '<Column ss:Width="65"/>\n' +
+                '<Column ss:Width="60"/>\n' +
+                '<Column ss:Width="65"/>\n' +
+                '<Column ss:Width="55"/>\n' +
+                '<Column ss:Width="55"/>\n' +
+                '<Column ss:Width="60"/>\n' +
+                '<Column ss:Width="60"/>\n' +
                 '<Row>\n' +
                 '<Cell ss:StyleID="sPlain"><Data ss:Type="String">WO720.R   # ' + escapeXml(prebookId) + '   ALL RAW MATERIALS PROJECTION REPORT FOR ALL RECIPES</Data></Cell>\n' +
                 '</Row>\n' +
                 '<Row>\n' +
-                // TODO: "PREPARED FOR" debería ser company/branch; por ahora usa el nombre del Prebook.
                 '<Cell ss:StyleID="sPlain"><Data ss:Type="String">PREPARED FOR: ' + escapeXml(preebookData?.name) + '</Data></Cell>\n' +
                 '</Row>\n' +
                 '<Row>\n' +
@@ -278,7 +224,6 @@ define([
             headers.forEach(header => { xmlString += strCell(header); });
             xmlString += '</Row>\n';
 
-            // Una fila por item (sin sub-filas; el reporte agrega "para todas las recetas").
             rows.forEach(row => {
                 xmlString += '<Row>';
                 xmlString += strCell(row.cat);
@@ -331,13 +276,9 @@ define([
             return excelFile;
         } catch (error) {
             log.error('GREENS.crearExcel', `Error al crear Excel: ${error.message}`);
-            throw error; // propagar para que el shell muestre el mensaje
+            throw error;
         }
     };
-
-    // =========================================================================
-    // 6. PDF
-    // =========================================================================
 
     const findTemplateFileId = (fileName) => {
         const sql = `SELECT id FROM file WHERE name = ? ORDER BY id`;
@@ -346,7 +287,6 @@ define([
         return results.length ? results[0].id : null;
     };
 
-    /** Genera el PDF desde la plantilla FTL. Aliases FreeMarker: record (prebook), data. */
     const crearPDF = (headers, rows, fileName, prebookId, preebookData) => {
         try {
             const templateFileId = findTemplateFileId(GR_TEMPLATE_FILENAME);
@@ -391,48 +331,10 @@ define([
             return pdfFile;
         } catch (error) {
             log.error('GREENS.crearPDF', `Error al crear PDF: ${error.message}`);
-            throw error; // re-lanzar para que el shell muestre el mensaje (igual que crearExcel)
+            throw error;
         }
     };
 
-    // =========================================================================
-    // 7. DATA — loadBomComponents (GREENS)
-    // =========================================================================
-
-    /**
-     * Agrega los componentes GREENS del Prebook en UNA fila por item (el reporte
-     * es "para todas las recetas": se suman las apariciones del item en todas
-     * las BOM Revisions vigentes), usando la MISMA lógica de explosión de 2
-     * niveles que R1/pa_sl_bom_explosion_ui.js (ver fase 2).
-     *
-     * Mapeo de columnas → fuente:
-     *   CAT/PRODUCT CODE/DESCRIPTION/PACK PK/STM ← item.
-     *   STEMS NEEDED  ← suma de bomquantity (2 niveles: comp × subcomp si
-     *     WORK_ORDER/PHANTOM) entre todas las recetas vigentes donde el green
-     *     es material real, dedup a 1 revisión por BOM (mayor ID). SIN
-     *     proyección de demanda (confirmado por Omar — a diferencia de TOTAL
-     *     UNITS en R1, que sí multiplica por la proyección del producto
-     *     terminado).
-     *   BUNCHES NEEDED ← STEMS NEEDED / stems-por-bunch (custitem_sgp_actualstems).
-     *   CASES NEEDED   ← CEIL(BUNCHES NEEDED / packing), mostrado "NxPacking"
-     *     (packing = custitem_sgp_packing; validado contra el PDF de referencia).
-     *   QUANTITY ONHAND← inventario inicial del Prebook, snapshot sin ubicación.
-     *   UNIT PREP COMP ← unidades de Assembly Build (type='Build') para este Prebook.
-     *   PO RECVD/IN BOUND LOC1 ← de líneas de PO filtradas a LOC1_ID (fase 6).
-     *   CASES SHORT/OVER LOC1  ← (onhand + recvd + inbound) vs CASES NEEDED,
-     *     mismo formato "NxPacking" (confirmado por Omar).
-     *   CAT/orden del reporte ← custrecord_sgp_categoty_printing_seq (fase 9).
-     *   BOM/BomRevision (nivel 1) con '*' en el name, e ítems con '*' en el
-     *     itemid, quedan excluidos (fases 1 y 2).
-     *
-     * Filtro de fechas: SQL-side, contra el rango CURRENT del Prebook (no
-     * historical), solo nivel 1 — ver fase 2 y toIsoDateStr/parseAccountDate.
-     *
-     * @param {string} prebookId
-     * @param {string} currentStart - custrecord_sgp_pb_current_start_date
-     * @param {string} currentEnd   - custrecord_sgp_pb_currency_end_date
-     * @returns {Array<Object>}
-     */
     const loadBomComponents = (prebookId, currentStart, currentEnd) => {
         const rows = [];
         let phase = 'init';
@@ -444,6 +346,7 @@ define([
                 category.custrecord_sgp_printing_prefix        AS category_code,
                 category.name                                  AS category_name,
                 category.custrecord_sgp_categoty_printing_seq  AS printing_seq,
+                subcat.custrecord_sgp_code                     AS subcat_code,
                 itm.itemid AS item_name,
                 NVL(itm.purchasedescription, ' ') AS description,
                 itm.id AS item,
@@ -453,15 +356,19 @@ define([
                 item itm
             INNER JOIN
                 customrecord_sgp_category category ON category.id = itm.custitem_sgp_category
+            LEFT JOIN
+                customrecord_sgp_subcategory subcat ON subcat.id = itm.custitem_sgp_subcategory
             WHERE
                 itm.custitem_sgp_category IS NOT NULL
                 AND itm.isinactive = 'F'
                 AND LOWER(BUILTIN.DF(itm.custitem_sgp_category)) LIKE '%greens%'
                 AND (itm.itemid IS NULL OR itm.itemid NOT LIKE '%*%')
+                AND UPPER(BUILTIN.DF(itm.unitstype)) = 'CASE'
             GROUP BY
                 category.custrecord_sgp_printing_prefix,
                 category.name,
                 category.custrecord_sgp_categoty_printing_seq,
+                subcat.custrecord_sgp_code,
                 itm.itemid,
                 NVL(itm.purchasedescription, ' '),
                 itm.id,
@@ -470,7 +377,6 @@ define([
         `;
 
         try {
-            // ── 1. Ítems GREENS ────────────────────────────────────────────
             phase = '1-greens items';
             const results_gnl = runSuiteQLAll(sql_generalComponents);
             if (!results_gnl.length) {
@@ -480,24 +386,10 @@ define([
             log.audit('GREENS.loadBomComponents', `Ítems GREENS: ${results_gnl.length}`);
             const greenItemIds = results_gnl.map((r) => String(r.item));
 
-            // ── 2. Explosión de 2 niveles (mismo patrón que R1 / pa_sl_bom_explosion_ui.js) ──
-            //      Nivel 1: bom → bomRevisionBomMap → bomRevision → bomRevisionComponentMember.
-            //      Nivel 2 (solo si comp.itemsource es WORK_ORDER/PHANTOM): se repite la
-            //      cadena partiendo de comp.item como "assembly" para llegar al green real.
-            //      item_id final = subcomp.item si hay 2do nivel, si no comp.item.
-            //      bom_quantity = comp.bomquantity × subcomp.bomquantity (× 1 si no hay
-            //      2do nivel). SIN proyección de demanda (confirmado por Omar: STEMS
-            //      NEEDED es solo la suma de bomquantity, no se multiplica por ningún
-            //      producto terminado — a diferencia de TOTAL UNITS en R1).
-            //      Filtrado ya en SQL: activos (bom/bomRevision, niveles 1 y 2) + rango
-            //      CURRENT (solo nivel 1) + BOM/BomRevision nivel 1 con '*' excluidos +
-            //      green final dentro de greenItemIds + WORK_ORDER/PHANTOM sin sub-BOM
-            //      se descarta. SELECT DISTINCT: resguardo contra fan-out de
-            //      itemAssemblyItemBom (un BOM puede estar ligado a más de un ítem).
             phase = '2-explosion 2 niveles + fechas + inactivos';
-            const revisionDataByItem = {};   // itemId → { revisionId: bomquantity (sumado) }
-            const bomIdByRevision = {};      // revisionId → bomId (siempre nivel 1)
-            const bomIdSet = {};             // bomId → true (solo diagnóstico)
+            const revisionDataByItem = {};
+            const bomIdByRevision = {};
+            const bomIdSet = {};
             const currentStartIso = toIsoDateStr(parseAccountDate(currentStart));
             const currentEndIso = toIsoDateStr(parseAccountDate(currentEnd));
             const dateConds = [];
@@ -555,8 +447,6 @@ define([
                     const itemId = String(r.item_id);
                     const revId = String(r.revision_id);
                     if (!revisionDataByItem[itemId]) revisionDataByItem[itemId] = {};
-                    // Suma (no sobrescribe): el mismo ítem puede llegar por más de una
-                    // línea/ruta dentro de la misma revisión (directo + phantom).
                     revisionDataByItem[itemId][revId] =
                         (revisionDataByItem[itemId][revId] || 0) + (Number(r.bom_quantity) || 0);
                     bomIdByRevision[revId] = String(r.bom_id);
@@ -570,7 +460,6 @@ define([
                     'Fase 2: SIN resultados — ningún green aparece (directo o vía phantom/WO) como componente de ninguna receta vigente. STEMS/BUNCHES/CASES NEEDED quedarán en 0 para todos.');
             }
 
-            // ── 6. PO recibidas / pedidas (LOC1) por green ────────────────────
             phase = '6-po qty y recibido (LOC1)';
             const poByItem = {};
             let totalPoRows = 0;
@@ -603,7 +492,6 @@ define([
                     'Fase 6: 0 filas de PO — revisar que existan Purchase Orders con custbody_sgp_report_id=' + prebookId + '.');
             }
 
-            // ── 7. Inventario inicial del Prebook (snapshot, sin ubicación) ───
             phase = '7-inventario inicial';
             const invByItem = {};
             let totalInvRows = 0;
@@ -631,7 +519,6 @@ define([
                     'Fase 7: 0 filas de inventario inicial — revisar customrecord_bc_preebookbeginninginv.custrecordprebook=' + prebookId + ' con líneas activas.');
             }
 
-            // ── 8. UNIT PREP COMP: Assembly Build completados (sin ubicación) ─
             phase = '8-unit prep comp (assembly build)';
             const prepByItem = {};
             let totalPrepRows = 0;
@@ -660,17 +547,7 @@ define([
             log.audit('GREENS.loadBomComponents',
                 `Fase 8: Assembly Build filas=${totalPrepRows}, greens con producción=${Object.keys(prepByItem).length} de ${greenItemIds.length} (custbody_sgp_report_id=${prebookId})`);
 
-            // ── 9. Armado de filas ─────────────────────────────────────────────
-            //      STEMS NEEDED = suma de bomquantity (2 niveles, fase 2) entre
-            //      TODAS las recetas donde el green aparece, dedup a 1 revisión por
-            //      BOM (la de mayor ID entre las vigentes — mismo patrón que R1).
-            //      Sin proyección de demanda (confirmado: no es como TOTAL UNITS de R1).
-            //      CASES NEEDED = CEIL(BUNCHES NEEDED / packing), mostrado "NxPacking"
-            //      (validado contra el PDF de referencia). CASES SHORT/OVER = supply
-            //      total (onhand+recibido+inbound) vs CASES NEEDED, mismo formato.
             phase = '9-armado filas';
-            // Contadores de diagnóstico: en qué punto se descarta cada green al armar
-            // STEMS NEEDED, y cuántos items terminan con cada columna en 0.
             let itemsNoRevData = 0, skipsNoBomId = 0;
             let itemsWithStems = 0, itemsWithOnHand = 0, itemsWithPoReceived = 0, itemsWithPrep = 0;
             results_gnl.forEach((r) => {
@@ -678,13 +555,10 @@ define([
                 const packing = Number(r.packing) || 0;
                 const actualStems = Number(r.actual_stems) || 0;
 
-                // revData ya solo contiene revisiones vigentes + activas (filtradas en SQL, fase 2).
                 const revData = revisionDataByItem[itemId] || {};
                 if (!Object.keys(revData).length) itemsNoRevData++;
 
-                // Dedup: 1 revisión por BOM (la de mayor ID entre las que calificaron) —
-                // evita sumar 2 veces el mismo BOM si tuviera más de una revisión vigente.
-                const bestRevByBom = {};   // bomId → { revId, bomquantity }
+                const bestRevByBom = {};
                 Object.keys(revData).forEach((revId) => {
                     const bomId = bomIdByRevision[revId];
                     if (!bomId) { skipsNoBomId++; return; }
@@ -697,7 +571,6 @@ define([
                     .reduce((sum, bomId) => sum + (bestRevByBom[bomId].bomquantity || 0), 0);
 
                 const bunchesNeeded = actualStems > 0 ? Math.ceil(stemsNeeded / actualStems) : 0;
-                // CASES NEEDED: conteo numérico (para CASES SHORT/OVER) + texto "NxPacking" (display).
                 const casesNeededCount = packing > 0 ? Math.ceil(bunchesNeeded / packing) : 0;
                 const casesNeeded = packing > 0 ? `${casesNeededCount}X${packing}` : String(casesNeededCount);
 
@@ -720,8 +593,11 @@ define([
                 if (poReceived > 0) itemsWithPoReceived++;
                 if (unitprepcomp > 0) itemsWithPrep++;
 
+                const catCode = r.category_code || r.category_name || '';
+                const subcatCode = safeStr(r.subcat_code);
                 rows.push({
-                    cat: r.category_code || r.category_name || '',
+                    cat: [catCode, subcatCode].filter((v) => v !== '').join(' '),
+                    subcatCode: subcatCode,
                     printingSeq: isEmptyValue(r.printing_seq) ? Number.MAX_SAFE_INTEGER : Number(r.printing_seq),
                     productCode: r.item_name || '',
                     description: r.description || '',
@@ -741,10 +617,10 @@ define([
                 });
             });
 
-            // Orden del reporte: custrecord_sgp_categoty_printing_seq ascendente
-            // (empate por productCode) — mismo criterio que R1.
             rows.sort((a, b) => {
                 if (a.printingSeq !== b.printingSeq) return a.printingSeq - b.printingSeq;
+                const sc = String(a.subcatCode || '').localeCompare(String(b.subcatCode || ''));
+                if (sc !== 0) return sc;
                 return String(a.productCode).localeCompare(String(b.productCode));
             });
 
@@ -761,17 +637,12 @@ define([
         return rows;
     };
 
-    // =========================================================================
-    // MISC HELPERS
-    // =========================================================================
-
     const nowStamp = () => {
         const d = new Date();
         const pad = (n) => String(n).padStart(2, '0');
         return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
     };
 
-    /** Timestamp legible para el header del PDF (ej. "30 Mar 2026  09:37"), igual formato que el reporte legacy de referencia. */
     const nowDisplayStamp = () => {
         const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
         const d = new Date();
@@ -779,7 +650,6 @@ define([
         return `${pad(d.getDate())} ${MONTHS[d.getMonth()]} ${d.getFullYear()}  ${pad(d.getHours())}:${pad(d.getMinutes())}`;
     };
 
-    /** Detecta valores "vacíos", incluyendo ScriptNullObjectAdapter (ver R1). */
     const isEmptyValue = (v) => {
         if (v === null || v === undefined || v === '') return true;
         if (typeof v === 'object') {
@@ -788,10 +658,8 @@ define([
         return false;
     };
 
-    /** Convierte a string vacío cualquier valor "vacío" (ver isEmptyValue). */
     const safeStr = (v) => (isEmptyValue(v) ? '' : String(v));
 
-    /** Parsea fecha de cuenta (ISO o MM/DD/YYYY) a Date. Null si no se puede interpretar. */
     const parseAccountDate = (v) => {
         const s = safeStr(v);
         if (!s) return null;
@@ -809,14 +677,12 @@ define([
         return isNaN(fallback.getTime()) ? null : fallback;
     };
 
-    /** Formatea un Date como 'YYYY-MM-DD' para bind params de TO_DATE() en SuiteQL. */
     const toIsoDateStr = (d) => {
         if (!d) return null;
         const pad = (n) => String(n).padStart(2, '0');
         return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
     };
 
-    /** Corre SuiteQL paginando de a 1000 filas (evita el límite de 5000 de runSuiteQL directo). */
     const runSuiteQLAll = (sql, params) => {
         params = params || [];
         try {
@@ -839,7 +705,6 @@ define([
         }
     };
 
-    /** Parte un arreglo de IDs en listas para cláusulas IN (), en bloques de `size`. */
     const chunkIds = (ids, size) => {
         const out = [];
         for (let i = 0; i < ids.length; i += size) {
@@ -850,7 +715,6 @@ define([
         return out;
     };
 
-    // NOTA: código muerto (no se invoca desde generate()), heredado de una versión previa.
     const buildEmptyResponse = (format, prebookId, preebookData) => {
         const headers = ['CAT', 'PRODUCT CODE', 'PRODUCT DESCRIPTION', 'PACK PK/STM', 'STEMS NEEDED',
             'BUNCHES NEEDED', 'CASES NEEDED', 'QUANTITY ONHAND', 'UNIT PREP COMP', 'PO RECVD LOC1',
@@ -861,7 +725,6 @@ define([
         return { fileObj: crearExcel(headers, [], `Greens_Projection_${prebookId}_${nowStamp()}.xlsx`, prebookId, preebookData), contentType: 'application/vnd.ms-excel', filename: `Greens_Projection_${prebookId}.xls` };
     };
 
-    // =========================================================================
     return {
         getMetadata,
         getFilterDefinitions,
