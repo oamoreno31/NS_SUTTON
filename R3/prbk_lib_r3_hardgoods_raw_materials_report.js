@@ -1,20 +1,6 @@
 /**
  * @NApiVersion 2.1
  * @NModuleScope Public
- *
- * R3 — ALL RAW MATERIALS PROJECTION REPORT (HARDGOODS)
- * Hermano de prbk_lib_r2_greens_projection_report.js: misma arquitectura y
- * mismas fórmulas (explosión 2 niveles, sin proyección de demanda, LOC1
- * únicamente), pero filtrando ítems HARDGOODS (igual que R1) en vez de GREENS,
- * columna "UNITS NEEDED" en vez de "STEMS NEEDED", y TRES vistas del mismo
- * dataset: MAIN (plana, sort Vendor → Subcategory → Product Code), CATEGORY
- * (agrupada por CAT) y VENDOR (agrupada por Vendor) — las 3 descargables en
- * Excel/PDF y las 3 disponibles como pestañas en el preview embebido.
- *
- * Columnas (orden del reporte impreso, igual en las 3 vistas):
- *   CAT | PRODUCT CODE | PRODUCT DESCRIPTION | PACK PK/STM | UNITS NEEDED |
- *   BUNCHES NEEDED | CASES NEEDED | QUANTITY ONHAND | UNIT PREP COMP |
- *   PO RECVD LOC1 | IN BOUND LOC1 | CASES SHORT LOC1 | CASES OVER LOC1
  */
 define([
     'N/query',
@@ -27,37 +13,22 @@ define([
     './prbk_lib_reports_common'
 ], (query, search, render, record, log, file, encode, common) => {
 
-    // =========================================================================
-    // CONSTANTS
-    // =========================================================================
+    const LOC1_ID = 1;
+    const LOC1_LABEL = 'LOC1';
 
-    const LOC1_ID = 1;          // Internal ID real de LOC1
-    const LOC1_LABEL = 'LOC1';  // nombre visible de LOC1
-
-    // Nombre del .ftl en el File Cabinet; su ID se resuelve en runtime (findTemplateFileId).
     const HG_TEMPLATE_FILENAME = 'prbk_custtmpl_r3_hardgoods_raw_materials_report.ftl';
 
-    // Límite real de file.create en NetSuite es 10 MB; dejamos margen.
     const MAX_XLS_BYTES = 9.8 * 1024 * 1024;
 
-    // Vistas soportadas (preview + descarga).
     const VIEW_MAIN = 'MAIN';
     const VIEW_CATEGORY = 'CATEGORY';
     const VIEW_VENDOR = 'VENDOR';
 
-    // Orden de columnas confirmado contra el PDF de referencia (WO720.RH by
-    // vendor, 2026-07-24): QUANTY ONHAND, PO RECVD, UNITS PREP COMP, IN BOUND
-    // (antes teníamos PO RECVD después de UNIT PREP COMP — corregido).
     const HEADERS = ['CAT', 'PRODUCT CODE', 'PRODUCT DESCRIPTION', 'PACK PKxSTM', 'UNITS NEEDED',
         'BUNCHES NEEDED', 'CASES NEEDED', 'QUANTITY ONHAND', 'PO RECVD LOC1', 'UNIT PREP COMP',
         'IN BOUND LOC1', 'CASES SHORT LOC1', 'CASES OVER LOC1'];
 
-    // Etiqueta para filas/vendors/categorías sin dato (blank ordena primero, igual que el PDF de referencia).
     const BLANK_LABEL = '/';
-
-    // =========================================================================
-    // 1. METADATA
-    // =========================================================================
 
     const getMetadata = () => ({
         id: 'HARDGOODS_RM_PROJECTION',
@@ -67,10 +38,6 @@ define([
             'by Category and by Vendor.',
         formats: ['PDF', 'EXCEL']
     });
-
-    // =========================================================================
-    // 2. FILTROS
-    // =========================================================================
 
     const getFilterDefinitions = () => ([
         {
@@ -91,8 +58,6 @@ define([
                 { value: 'PDF', text: 'PDF' }
             ],
             helpText: 'Select the document format to generate (Excel or PDF).',
-            // previewChoice: el shell oculta este campo y lo elige desde los
-            // botones Download Excel/PDF del preview. Ver prbk_sl_reports_shell.js.
             previewChoice: true
         },
         {
@@ -107,15 +72,9 @@ define([
                 { value: VIEW_VENDOR, text: 'By Vendor' }
             ],
             helpText: 'Report layout: flat (Main), grouped by Category, or grouped by Vendor.',
-            // previewChoice también: el preview la setea sola según la pestaña
-            // activa al hacer clic en Download (ver prbk_sl_reports_shell.js).
             previewChoice: true
         }
     ]);
-
-    // =========================================================================
-    // 3. VALIDACIÓN
-    // =========================================================================
 
     const validateFilters = (values) => {
         if (!values.prebook) {
@@ -135,14 +94,6 @@ define([
         return { valid: true };
     };
 
-    // =========================================================================
-    // 4. GENERATE
-    // =========================================================================
-
-    /**
-     * @param {Object} filterValues - .prebook, .output_format, .view (MAIN|CATEGORY|VENDOR)
-     * @returns {Object} { fileObj, contentType, filename }
-     */
     const generate = (filterValues) => {
         const prebookId = String(filterValues.prebook);
         const format = String(filterValues.output_format || 'EXCEL').toUpperCase();
@@ -165,15 +116,6 @@ define([
         return { fileObj: reportExcel, contentType: 'application/vnd.ms-excel', filename: `${baseName}.xls` };
     };
 
-    // =========================================================================
-    // 4b. GET PREVIEW DATA — 3 pestañas (views) con el mismo dataset, cada una
-    //     con su propio orden/agrupación. No genera archivo.
-    // =========================================================================
-
-    /**
-     * @param {Object} filterValues - .prebook (output_format/view se eligen en el preview)
-     * @returns {Object} { title, prebookName, metaLines, views: [{id,label,headers,rows,rowCount}] }
-     */
     const getPreviewData = (filterValues) => {
         const prebookId = String(filterValues.prebook);
         log.audit('HG_RM.getPreviewData', `prebook=${prebookId}`);
@@ -217,7 +159,6 @@ define([
         };
     };
 
-    /** Header del Prebook, ya sanitizado con safeStr (blinda contra ScriptNullObjectAdapter). */
     const loadPrebookHeader = (prebookId) => {
         const raw = search.lookupFields({
             type: 'customrecord_sgp_prebook',
@@ -239,11 +180,6 @@ define([
         };
     };
 
-    // =========================================================================
-    // 4c. VIEW PAYLOAD — arma la estructura que consumen crearExcel/crearPDF.
-    //     MAIN: { view, flat: [...] }   CATEGORY/VENDOR: { view, groups: [{label, rows}] }
-    // =========================================================================
-
     const buildViewPayload = (view, rows) => {
         if (view === VIEW_CATEGORY) {
             return { view: VIEW_CATEGORY, groups: groupByCategory(rows) };
@@ -254,8 +190,11 @@ define([
         return { view: VIEW_MAIN, flat: sortMain(rows.slice()) };
     };
 
-    /** Sort de la vista MAIN: Vendor → Subcategory → Product Code (alfabético, los 3 ascendentes). */
+    const seqOf = (r) => (r.printingSeq == null ? Number.MAX_SAFE_INTEGER : r.printingSeq);
+
     const sortMain = (rows) => rows.sort((a, b) => {
+        const sq = seqOf(a) - seqOf(b);
+        if (sq !== 0) return sq;
         const v = String(a.vendor || '').localeCompare(String(b.vendor || ''));
         if (v !== 0) return v;
         const s = String(a.subcategory || '').localeCompare(String(b.subcategory || ''));
@@ -263,16 +202,19 @@ define([
         return String(a.productCode || '').localeCompare(String(b.productCode || ''));
     });
 
-    /** Agrupa por CAT (orden de grupo: category_printing_seq asc, empate alfabético; dentro de cada grupo, Product Code asc). */
     const groupByCategory = (rows) => {
         const byLabel = {};
         rows.forEach((r) => {
-            const label = r.cat || BLANK_LABEL;
+            const label = r.catCode || BLANK_LABEL;
             if (!byLabel[label]) byLabel[label] = { label: label, seq: r.printingSeq, rows: [] };
             byLabel[label].rows.push(r);
         });
         const groups = Object.keys(byLabel).map((k) => byLabel[k]);
-        groups.forEach((g) => g.rows.sort((a, b) => String(a.productCode || '').localeCompare(String(b.productCode || ''))));
+        groups.forEach((g) => g.rows.sort((a, b) => {
+            const sq = seqOf(a) - seqOf(b);
+            if (sq !== 0) return sq;
+            return String(a.productCode || '').localeCompare(String(b.productCode || ''));
+        }));
         groups.sort((a, b) => {
             const seqA = a.seq == null ? Number.MAX_SAFE_INTEGER : a.seq;
             const seqB = b.seq == null ? Number.MAX_SAFE_INTEGER : b.seq;
@@ -282,11 +224,6 @@ define([
         return groups;
     };
 
-    /**
-     * Agrupa por Vendor. Orden confirmado por Omar (2026-07-24): Vendor
-     * (grupo, alfabético A-Z, blank primero) → Product Code (A-Z) →
-     * Subcategory (custitem_sgp_subcategory, como desempate final).
-     */
     const groupByVendor = (rows) => {
         const byLabel = {};
         rows.forEach((r) => {
@@ -296,6 +233,8 @@ define([
         });
         const groups = Object.keys(byLabel).map((k) => byLabel[k]);
         groups.forEach((g) => g.rows.sort((a, b) => {
+            const sq = seqOf(a) - seqOf(b);
+            if (sq !== 0) return sq;
             const p = String(a.productCode || '').localeCompare(String(b.productCode || ''));
             if (p !== 0) return p;
             return String(a.subcategory || '').localeCompare(String(b.subcategory || ''));
@@ -304,7 +243,6 @@ define([
         return groups;
     };
 
-    /** Fila plana en el mismo orden de columnas que HEADERS. */
     const rowToCells = (r) => ([
         safeStr(r.cat), safeStr(r.productCode), safeStr(r.description), safeStr(r.pkstm),
         String(r.unitsNeeded || 0), String(r.bunchesNeeded || 0), String(r.casesNeeded || 0),
@@ -316,14 +254,9 @@ define([
 
     const toFlatPreviewRows = (rows) => rows.map(rowToCells);
 
-    // Marcador que el shell (prbk_sl_reports_shell.js) reconoce para pintar una
-    // fila de sección colapsable (colspan, toggle, conteo de items) en vez de
-    // una fila de datos normal. Formato: SECTION_MARKER + label + COUNT_MARKER + n.
-    // Ver buildTabbedPreviewFragment / SECTION_MARKER / COUNT_MARKER en el shell.
     const SECTION_MARKER = '§SECTION§';
     const COUNT_MARKER = '§N§';
 
-    /** Convierte grupos a filas planas para el preview: 1 fila-título (marcador de sección + conteo) + sus filas. */
     const groupedToPreviewRows = (groups) => {
         const out = [];
         groups.forEach((g) => {
@@ -332,10 +265,6 @@ define([
         });
         return out;
     };
-
-    // =========================================================================
-    // 5. EXCEL
-    // =========================================================================
 
     const crearExcel = (payload, fileName, prebookId, preebookData) => {
         try {
@@ -390,19 +319,19 @@ define([
                 '<Worksheet ss:Name="Hoja1">\n' +
                 '<Table ss:ExpandedColumnCount="' + (HEADERS.length + 2) + '" ss:ExpandedRowCount="' + (totalDataRows + 100) + '" x:FullColumns="1"\n' +
                 'x:FullRows="1" ss:DefaultRowHeight="14.4">\n' +
-                '<Column ss:Width="35"/>\n' +     // CAT
-                '<Column ss:Width="60"/>\n' +     // PRODUCT CODE
-                '<Column ss:Width="160"/>\n' +    // PRODUCT DESCRIPTION
-                '<Column ss:Width="55"/>\n' +     // PACK PKxSTM
-                '<Column ss:Width="60"/>\n' +     // UNITS NEEDED
-                '<Column ss:Width="65"/>\n' +     // BUNCHES NEEDED
-                '<Column ss:Width="60"/>\n' +     // CASES NEEDED
-                '<Column ss:Width="65"/>\n' +     // QUANTITY ONHAND
-                '<Column ss:Width="55"/>\n' +     // PO RECVD LOC1
-                '<Column ss:Width="55"/>\n' +     // UNIT PREP COMP
-                '<Column ss:Width="55"/>\n' +     // IN BOUND LOC1
-                '<Column ss:Width="60"/>\n' +     // CASES SHORT LOC1
-                '<Column ss:Width="60"/>\n' +     // CASES OVER LOC1
+                '<Column ss:Width="45"/>\n' +
+                '<Column ss:Width="60"/>\n' +
+                '<Column ss:Width="160"/>\n' +
+                '<Column ss:Width="55"/>\n' +
+                '<Column ss:Width="60"/>\n' +
+                '<Column ss:Width="65"/>\n' +
+                '<Column ss:Width="60"/>\n' +
+                '<Column ss:Width="65"/>\n' +
+                '<Column ss:Width="55"/>\n' +
+                '<Column ss:Width="55"/>\n' +
+                '<Column ss:Width="55"/>\n' +
+                '<Column ss:Width="60"/>\n' +
+                '<Column ss:Width="60"/>\n' +
                 '<Row>\n' +
                 '<Cell ss:StyleID="sPlain"><Data ss:Type="String">WO720.RH   # ' + escapeXml(prebookId) + '   ALL RAW MATERIALS PROJECTION REPORT FOR ALL RECIPES</Data></Cell>\n' +
                 '</Row>\n' +
@@ -439,8 +368,6 @@ define([
                 payload.flat.forEach(writeRow);
             } else {
                 payload.groups.forEach((g) => {
-                    // Sin espacio tras ':' y sin mostrar el label si es BLANK_LABEL ('/') —
-                    // igual que el PDF de referencia ("Vendor:" solo, "Vendor:25112" con datos).
                     const prefix = payload.view === VIEW_CATEGORY ? 'Category:' : 'Vendor:';
                     const shownLabel = g.label === BLANK_LABEL ? '' : g.label;
                     const label = prefix + shownLabel +
@@ -489,10 +416,6 @@ define([
         }
     };
 
-    // =========================================================================
-    // 6. PDF
-    // =========================================================================
-
     const findTemplateFileId = (fileName) => {
         const sql = `SELECT id FROM file WHERE name = ? ORDER BY id`;
         const rs = query.runSuiteQL({ query: sql, params: [fileName] });
@@ -500,7 +423,6 @@ define([
         return results.length ? results[0].id : null;
     };
 
-    /** Genera el PDF desde la plantilla FTL. La FTL branchea por data.metadata.view (MAIN plana / CATEGORY,VENDOR agrupadas por data.groups). */
     const crearPDF = (payload, fileName, prebookId, preebookData) => {
         try {
             const templateFileId = findTemplateFileId(HG_TEMPLATE_FILENAME);
@@ -558,52 +480,6 @@ define([
         }
     };
 
-    // =========================================================================
-    // 7. DATA — loadHardgoodsRawMaterials
-    // =========================================================================
-
-    /**
-     * Agrega los componentes HARDGOODS del Prebook en UNA fila por item (el
-     * reporte es "para todas las recetas": se suman las apariciones del item en
-     * todas las BOM Revisions vigentes), usando la MISMA lógica de explosión de
-     * 2 niveles que R1/R2/pa_sl_bom_explosion_ui.js (ver fase 2), y las MISMAS
-     * fórmulas que R2 (sin proyección de demanda, LOC1 únicamente).
-     *
-     * Mapeo de columnas → fuente:
-     *   Filtro de ítems ← mismo criterio que R1: customrecord_cseg_sgp_prod_cat
-     *     con name='hardgoods' (fase 1); CAT ← custitem_sgp_category.
-     *     custrecord_sgp_printing_prefix (catprefix, LEFT JOIN, igual que R1).
-     *   VENDOR ← item.vendorname (campo estándar "Vendor Name" del ítem).
-     *   SUBCATEGORY ← item.custitem_sgp_subcategory.
-     *   UNITS NEEDED  ← suma de bomquantity (2 niveles: comp × subcomp si
-     *     WORK_ORDER/PHANTOM) entre todas las recetas vigentes donde el hardgood
-     *     es material real, dedup a 1 revisión por BOM (mayor ID). SIN
-     *     proyección de demanda (mismo criterio confirmado para R2 — a
-     *     diferencia de TOTAL UNITS en R1).
-     *   BUNCHES NEEDED ← UNITS NEEDED / stems-por-bunch (custitem_sgp_actualstems).
-     *   CASES NEEDED   ← CEIL(BUNCHES NEEDED / packing), mostrado "NxPacking".
-     *   QUANTITY ONHAND← inventario inicial del Prebook, snapshot sin ubicación.
-     *   UNIT PREP COMP ← unidades de Assembly Build (type='Build') para este Prebook.
-     *   PO RECVD/IN BOUND LOC1 ← de líneas de PO filtradas a LOC1_ID (fase 6).
-     *   CASES SHORT/OVER LOC1  ← (onhand + recvd + inbound) vs CASES NEEDED,
-     *     mismo formato "NxPacking".
-     *   BOM/BomRevision (nivel 1) con '*' en el name, e ítems con '*' en el
-     *     itemid, quedan excluidos (fases 1 y 2).
-     *
-     * Filtro de fechas: SQL-side, contra el rango CURRENT del Prebook (no
-     * historical), solo nivel 1 — ver fase 2 y toIsoDateStr/parseAccountDate.
-     *
-     * NOTA (no confirmado con Omar): en el PDF de referencia, BUNCHES NEEDED
-     * es numéricamente casi siempre igual a UNITS NEEDED, lo que sugeriría un
-     * fallback de actualStems=1 (no 0) para hardgoods. Se deja igual que R2
-     * (actualStems>0 ? ceil(...) : 0) hasta confirmarlo — revisar si los
-     * primeros reportes reales no calzan.
-     *
-     * @param {string} prebookId
-     * @param {string} currentStart - custrecord_sgp_pb_current_start_date
-     * @param {string} currentEnd   - custrecord_sgp_pb_currency_end_date
-     * @returns {Array<Object>}
-     */
     const loadHardgoodsRawMaterials = (prebookId, currentStart, currentEnd) => {
         const rows = [];
         let phase = 'init';
@@ -615,6 +491,7 @@ define([
                 catprefix.custrecord_sgp_printing_prefix        AS category_code,
                 cat.name                                         AS category_name,
                 catprefix.custrecord_sgp_categoty_printing_seq  AS printing_seq,
+                subcat.custrecord_sgp_code                       AS subcat_code,
                 itm.itemid AS item_name,
                 NVL(itm.purchasedescription, ' ') AS description,
                 itm.id AS item,
@@ -628,6 +505,8 @@ define([
                 customrecord_cseg_sgp_prod_cat cat ON cat.id = itm.custitem_cseg_sgp_prod_cat
             LEFT JOIN
                 customrecord_sgp_category catprefix ON catprefix.id = itm.custitem_sgp_category
+            LEFT JOIN
+                customrecord_sgp_subcategory subcat ON subcat.id = itm.custitem_sgp_subcategory
             WHERE
                 LOWER(cat.name) = 'hardgoods'
                 AND itm.isinactive = 'F'
@@ -639,7 +518,6 @@ define([
         `;
 
         try {
-            // ── 1. Ítems HARDGOODS ─────────────────────────────────────────
             phase = '1-hardgoods items';
             const results_hg = runSuiteQLAll(sql_hardgoodsItems);
             if (!results_hg.length) {
@@ -649,11 +527,10 @@ define([
             log.audit('HG_RM.loadHardgoodsRawMaterials', `Ítems HARDGOODS: ${results_hg.length}`);
             const hardgoodsItemIds = results_hg.map((r) => String(r.item));
 
-            // ── 2. Explosión de 2 niveles (mismo patrón que R1/R2/pa_sl_bom_explosion_ui.js) ──
             phase = '2-explosion 2 niveles + fechas + inactivos';
-            const revisionDataByItem = {};   // itemId → { revisionId: bomquantity (sumado) }
-            const bomIdByRevision = {};      // revisionId → bomId (siempre nivel 1)
-            const bomIdSet = {};             // bomId → true (solo diagnóstico)
+            const revisionDataByItem = {};
+            const bomIdByRevision = {};
+            const bomIdSet = {};
             const currentStartIso = toIsoDateStr(parseAccountDate(currentStart));
             const currentEndIso = toIsoDateStr(parseAccountDate(currentEnd));
             const dateConds = [];
@@ -720,7 +597,6 @@ define([
             log.audit('HG_RM.loadHardgoodsRawMaterials',
                 `Fase 2: explosión filas=${totalComponentRows}, hardgoods con >=1 receta=${Object.keys(revisionDataByItem).length} de ${hardgoodsItemIds.length}, BOMs distintos=${Object.keys(bomIdSet).length}`);
 
-            // ── 6. PO recibidas / pedidas (LOC1) por hardgood ─────────────────
             phase = '6-po qty y recibido (LOC1)';
             const poByItem = {};
             let totalPoRows = 0;
@@ -749,7 +625,6 @@ define([
             log.audit('HG_RM.loadHardgoodsRawMaterials',
                 `Fase 6: líneas de PO (type=PurchOrd, location=LOC1) filas=${totalPoRows}, hardgoods con PO=${Object.keys(poByItem).length} de ${hardgoodsItemIds.length}`);
 
-            // ── 7. Inventario inicial del Prebook (snapshot, sin ubicación) ───
             phase = '7-inventario inicial';
             const invByItem = {};
             let totalInvRows = 0;
@@ -773,7 +648,6 @@ define([
             log.audit('HG_RM.loadHardgoodsRawMaterials',
                 `Fase 7: customrecord_bc_prebookbeginninginvline filas=${totalInvRows}, hardgoods con inventario inicial=${Object.keys(invByItem).length} de ${hardgoodsItemIds.length}`);
 
-            // ── 8. UNIT PREP COMP: Assembly Build completados (sin ubicación) ─
             phase = '8-unit prep comp (assembly build)';
             const prepByItem = {};
             let totalPrepRows = 0;
@@ -802,7 +676,6 @@ define([
             log.audit('HG_RM.loadHardgoodsRawMaterials',
                 `Fase 8: Assembly Build filas=${totalPrepRows}, hardgoods con producción=${Object.keys(prepByItem).length} de ${hardgoodsItemIds.length}`);
 
-            // ── 9. Armado de filas ─────────────────────────────────────────────
             phase = '9-armado filas';
             let itemsNoRevData = 0, skipsNoBomId = 0;
             let itemsWithUnits = 0, itemsWithOnHand = 0, itemsWithPoReceived = 0, itemsWithPrep = 0;
@@ -814,7 +687,7 @@ define([
                 const revData = revisionDataByItem[itemId] || {};
                 if (!Object.keys(revData).length) itemsNoRevData++;
 
-                const bestRevByBom = {};   // bomId → { revId, bomquantity }
+                const bestRevByBom = {};
                 Object.keys(revData).forEach((revId) => {
                     const bomId = bomIdByRevision[revId];
                     if (!bomId) { skipsNoBomId++; return; }
@@ -842,7 +715,6 @@ define([
                 const casesShort = diff < 0 ? fmtCasePack(Math.abs(diff)) : '';
                 const casesOver = diff > 0 ? fmtCasePack(diff) : '';
 
-                // Separador 'x' (no '/'): confirmado por el header "PACK PKxSTM" del PDF de referencia.
                 const pkstm = (packing || actualStems) ? `${packing}x${actualStems}` : '';
 
                 if (unitsNeeded > 0) itemsWithUnits++;
@@ -850,8 +722,12 @@ define([
                 if (poReceived > 0) itemsWithPoReceived++;
                 if (unitprepcomp > 0) itemsWithPrep++;
 
+                const catCode = r.category_code || r.category_name || '';
+                const subcatCode = safeStr(r.subcat_code);
                 rows.push({
-                    cat: r.category_code || r.category_name || '',
+                    cat: [catCode, subcatCode].filter((v) => v !== '').join(' '),
+                    catCode: catCode,
+                    subcatCode: subcatCode,
                     printingSeq: isEmptyValue(r.printing_seq) ? null : Number(r.printing_seq),
                     productCode: r.item_name || '',
                     description: r.description || '',
@@ -886,17 +762,12 @@ define([
         return rows;
     };
 
-    // =========================================================================
-    // MISC HELPERS
-    // =========================================================================
-
     const nowStamp = () => {
         const d = new Date();
         const pad = (n) => String(n).padStart(2, '0');
         return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
     };
 
-    /** Timestamp legible para el header del PDF (ej. "30 Mar 2026  09:41"), igual formato que el reporte legacy de referencia. */
     const nowDisplayStamp = () => {
         const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
         const d = new Date();
@@ -904,7 +775,6 @@ define([
         return `${pad(d.getDate())} ${MONTHS[d.getMonth()]} ${d.getFullYear()}  ${pad(d.getHours())}:${pad(d.getMinutes())}`;
     };
 
-    /** Detecta valores "vacíos", incluyendo ScriptNullObjectAdapter (ver R1/R2). */
     const isEmptyValue = (v) => {
         if (v === null || v === undefined || v === '') return true;
         if (typeof v === 'object') {
@@ -913,10 +783,8 @@ define([
         return false;
     };
 
-    /** Convierte a string vacío cualquier valor "vacío" (ver isEmptyValue). */
     const safeStr = (v) => (isEmptyValue(v) ? '' : String(v));
 
-    /** Parsea fecha de cuenta (ISO o MM/DD/YYYY) a Date. Null si no se puede interpretar. */
     const parseAccountDate = (v) => {
         const s = safeStr(v);
         if (!s) return null;
@@ -934,14 +802,12 @@ define([
         return isNaN(fallback.getTime()) ? null : fallback;
     };
 
-    /** Formatea un Date como 'YYYY-MM-DD' para bind params de TO_DATE() en SuiteQL. */
     const toIsoDateStr = (d) => {
         if (!d) return null;
         const pad = (n) => String(n).padStart(2, '0');
         return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
     };
 
-    /** Corre SuiteQL paginando de a 1000 filas (evita el límite de 5000 de runSuiteQL directo). */
     const runSuiteQLAll = (sql, params) => {
         params = params || [];
         try {
@@ -964,7 +830,6 @@ define([
         }
     };
 
-    /** Parte un arreglo de IDs en listas para cláusulas IN (), en bloques de `size`. */
     const chunkIds = (ids, size) => {
         const out = [];
         for (let i = 0; i < ids.length; i += size) {
@@ -975,7 +840,6 @@ define([
         return out;
     };
 
-    // =========================================================================
     return {
         getMetadata,
         getFilterDefinitions,

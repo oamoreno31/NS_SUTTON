@@ -1,40 +1,5 @@
 <?xml version="1.0"?>
 <!DOCTYPE pdf PUBLIC "-//big.faceless.org//report" "report-1.1.dtd">
-<#--
-    ============================================================================
-    All Raw Materials Projection Report — Hardgoods (R3)
-    Plantilla FreeMarker / Advanced PDF (BFO) para prbk_lib_r3_hardgoods_raw_materials_report.js
-
-    Contrato de datos (inyectado desde crearPDF):
-      record        -> customrecord_sgp_prebook (acceso: ${record.<campo>})
-      data.headers  -> Array de encabezados (mismo orden que el Excel, 13 columnas:
-                       CAT, PRODUCT CODE, PRODUCT DESCRIPTION, PACK PKxSTM,
-                       UNITS NEEDED, BUNCHES NEEDED, CASES NEEDED, QUANTITY ONHAND,
-                       PO RECVD LOC1, UNIT PREP COMP, IN BOUND LOC1,
-                       CASES SHORT LOC1, CASES OVER LOC1)
-      data.metadata -> { prebookId, prebookName, historicalStart, historicalEnd,
-                         currentStart, currentEnd, loc1Label, view,
-                         generatedAt, generatedAtDisplay, totalRows }
-      data.metadata.view = "MAIN" | "CATEGORY" | "VENDOR"
-
-      Si view == "MAIN":
-        data.report -> Array plano de filas (sort Vendor → Subcategory → Product Code)
-      Si view == "CATEGORY" | "VENDOR":
-        data.groups -> Array de { label, rows: [...] }, ya ordenado y agrupado
-                       (CATEGORY: por printing_seq; VENDOR: alfabético; label="/"
-                       significa "sin dato" — ver BLANK_LABEL en la librería,
-                       se pinta como "Vendor:"/"Category:" sin nada después)
-
-    DISEÑO (confirmado por Omar contra el PDF de referencia legacy "WO720.RH by
-    vendor", 2026-07-24):
-      - Vista MAIN: grid con bordes, encabezado gris (igual que antes).
-      - Vistas CATEGORY/VENDOR: estilo "reporte de sistema legacy" — fuente
-        monoespaciada, sin bordes de celda, header de grupo en texto plano
-        ("Vendor:25112 (7 items)") seguido de una línea de asteriscos, y una
-        línea punteada separando cada grupo del siguiente. "End of Report" al
-        final. Ver <table class="report-plain">.
-    ============================================================================
--->
 <#setting number_format="computer">
 <pdf>
 <head>
@@ -56,13 +21,11 @@
             color: #000000;
         }
 
-        /* ── Bloque de título ─────────────────────────────────────────── */
         table.title-block { width: 100%; margin-bottom: 6px; }
         .report-no    { font-size: 9pt; font-weight: bold; }
         .report-title { font-size: 8.5pt; font-weight: bold; }
         .meta-line    { font-size: 7.5pt; }
 
-        /* ── Vista MAIN: grid con bordes ──────────────────────────────── */
         table.report {
             width: 100%;
             border-collapse: collapse;
@@ -81,7 +44,6 @@
             vertical-align: top;
         }
 
-        /* ── Vistas CATEGORY/VENDOR: estilo legacy monoespaciado, sin bordes ── */
         table.report-plain {
             width: 100%;
             border-collapse: collapse;
@@ -124,7 +86,6 @@
         .num { text-align: right; }
         .ctr { text-align: center; }
 
-        /* ── Footer ───────────────────────────────────────────────────── */
         table.footer-table { width: 100%; font-size: 6pt; color: #555555; }
 
         .empty-msg { font-size: 9pt; font-style: italic; padding-top: 20px; }
@@ -134,13 +95,9 @@
 <body size="A4-landscape" footer="nlfooter" footer-height="18px"
       padding="0.4in 0.4in 0.4in 0.4in">
 
-    <#-- Líneas de relleno para separadores de grupo (ver group-rule/group-sep);
-         160/220 caracteres alcanzan el ancho de la página en A4-landscape a
-         6.5pt Courier — el overflow:hidden de la celda recorta el sobrante. -->
     <#assign STAR_LINE><#list 1..170 as i>*</#list></#assign>
     <#assign DASH_LINE><#list 1..220 as i>-</#list></#assign>
 
-    <#-- ===================== BLOQUE DE TÍTULO ===================== -->
     <table class="title-block">
         <tr>
             <td width="60%" class="report-no">WO720.RH&nbsp;&nbsp;&nbsp;# ${(data.metadata.prebookId!"")?xml}&nbsp;&nbsp;&nbsp;ALL RAW MATERIALS PROJECTION REPORT FOR ALL RECIPES</td>
@@ -157,30 +114,25 @@
         </tr>
     </table>
 
-    <#-- ===================== TABLA DEL REPORTE ==================== -->
     <#assign isMainView = (data.metadata.view!"MAIN") == "MAIN">
     <#assign tableClass = isMainView?then("report", "report-plain")>
     <table class="${tableClass}">
-        <#-- Anchos de columna (13 columnas: CAT, PRODUCT CODE, PRODUCT DESCRIPTION,
-             PACK PKxSTM, UNITS NEEDED, BUNCHES NEEDED, CASES NEEDED, QUANTITY ONHAND,
-             PO RECVD LOC1, UNIT PREP COMP, IN BOUND LOC1, CASES SHORT LOC1, CASES OVER LOC1) -->
         <colgroup>
-            <col width="4%"/>   <#-- CAT -->
-            <col width="8%"/>   <#-- PRODUCT CODE -->
-            <col width="18%"/>  <#-- PRODUCT DESCRIPTION -->
-            <col width="7%"/>   <#-- PACK PKxSTM -->
-            <col width="8%"/>   <#-- UNITS NEEDED -->
-            <col width="8%"/>   <#-- BUNCHES NEEDED -->
-            <col width="8%"/>   <#-- CASES NEEDED -->
-            <col width="8%"/>   <#-- QUANTITY ONHAND -->
-            <col width="7%"/>   <#-- PO RECVD LOC1 -->
-            <col width="7%"/>   <#-- UNIT PREP COMP -->
-            <col width="7%"/>   <#-- IN BOUND LOC1 -->
-            <col width="9%"/>   <#-- CASES SHORT LOC1 -->
-            <col width="9%"/>   <#-- CASES OVER LOC1 -->
+            <col width="6%"/>
+            <col width="8%"/>
+            <col width="18%"/>
+            <col width="7%"/>
+            <col width="8%"/>
+            <col width="8%"/>
+            <col width="8%"/>
+            <col width="8%"/>
+            <col width="7%"/>
+            <col width="7%"/>
+            <col width="7%"/>
+            <col width="9%"/>
+            <col width="9%"/>
         </colgroup>
 
-        <#-- Encabezados (se repiten en cada página gracias a thead) -->
         <thead>
             <tr>
                 <#list (data.headers)![] as h>
@@ -219,7 +171,6 @@
             <#else>
                 <#if (data.groups?? && data.groups?size > 0)>
                     <#list data.groups as g>
-                        <#-- Línea punteada ANTES de cada grupo salvo el primero (que arranca justo debajo del header de columnas). -->
                         <#if g?index gt 0>
                             <tr class="group-sep-row"><td class="group-sep" colspan="13">${DASH_LINE}</td></tr>
                         </#if>
