@@ -20,6 +20,22 @@ define([
     // Nombre del .ftl (File Cabinet) usado para el PDF.
     const HG_TEMPLATE_FILENAME = 'prbk_custtmpl_r1_hardgoods_buying_report.ftl';
 
+    // Encabezados ORIGINALES (con las abreviaciones pedidas) — no cambiar el set de columnas.
+    const ALL_HEADERS = ['CAT', 'PRODUCT', 'DESCRIPTION', 'TYPE', 'RECP.', 'CODE DESCRIPTION', 'CUST', 'CUSTOMER NAME',
+        'TOTAL UNITS', '+ -', 'FOB COST', 'LANDED COST', 'LOC1 OH UNITS', 'LOC2 OH UNITS',
+        'PO QTY', 'PO RCVD', 'PREP PROD.'];
+
+    // Columnas que se ocultan cuando el checkbox "Show item cost" está desmarcado.
+    const COST_HEADERS = ['FOB COST', 'LANDED COST'];
+
+    /** true si se deben mostrar FOB COST/LANDED COST (checkbox marcado por defecto). */
+    const isShowItemCost = (filterValues) =>
+        String((filterValues || {}).show_item_cost || 'T').toUpperCase() !== 'F';
+
+    /** Encabezados para el PDF: quita FOB COST/LANDED COST si showItemCost es false. */
+    const getPdfHeaders = (showItemCost) =>
+        showItemCost ? ALL_HEADERS : ALL_HEADERS.filter((h) => COST_HEADERS.indexOf(h) === -1);
+
     // =========================================================================
     // 1. METADATA
     // =========================================================================
@@ -59,6 +75,18 @@ define([
             // previewChoice: el shell oculta este campo y lo elige desde los
             // botones Download Excel/PDF del preview. Ver prbk_sl_reports_shell.js.
             previewChoice: true
+        },
+        {
+            id: 'show_item_cost',
+            label: 'Show item cost',
+            type: 'checkbox',
+            defaultValue: 'T',
+            // previewChoice + hideColumns: el shell pinta un checkbox real junto a los
+            // botones de descarga (marcado por defecto) que oculta/muestra, en el
+            // preview, las columnas cuyo header calce con hideColumns. Ver
+            // prbk_sl_reports_shell.js → buildPreviewFragment.
+            previewChoice: true,
+            hideColumns: COST_HEADERS
         }
     ]);
 
@@ -121,19 +149,18 @@ define([
         const bomRows = loadHardgoodsBomList(prebookId, currentStart, currentEnd);
         log.audit('HARDGOODS.bomRows', `count=${bomRows.length}`);
 
-        // Encabezados ORIGINALES — no cambiar este set de columnas.
-        const headers = ['CAT', 'PRODUCT', 'DESCRIPTION', 'TYPE', '# RECIPES', 'CODE DESCRIPTION', 'CUST', 'CUSTOMER NAME',
-            'TOTAL UNITS', '+ -', 'FOB COST', 'LANDED COST', 'LOC1 OH UNITS', 'LOC2 OH UNITS',
-            'PO QTY', 'PO RECEIVED', 'PREP PRODUCTION'];
+        const showItemCost = isShowItemCost(filterValues);
 
         const baseName = `HG_BuyingReport_${String(preebookData.name || prebookId).replace(/\s+/g, '_')}_${nowStamp()}`;
 
         if (format === 'PDF') {
-            const reportPdf = crearPDF(headers, bomRows, `${baseName}.pdf`, prebookId, preebookData);
+            const reportPdf = crearPDF(getPdfHeaders(showItemCost), bomRows, `${baseName}.pdf`, prebookId, preebookData, showItemCost);
             return { fileObj: reportPdf, contentType: 'PDF', filename: `${baseName}.pdf` };
         }
 
-        const reportExcel = crearExcel(headers, bomRows, `${baseName}.xlsx`, prebookId, preebookData);
+        // Excel siempre recibe el set completo de headers: la columna se oculta con
+        // ss:Hidden en crearExcel (así no se reindexan los <Column ss:Index="...">).
+        const reportExcel = crearExcel(ALL_HEADERS, bomRows, `${baseName}.xlsx`, prebookId, preebookData, showItemCost);
         return { fileObj: reportExcel, contentType: 'application/vnd.ms-excel', filename: `${baseName}.xls` };
     };
 
@@ -170,10 +197,9 @@ define([
             preebookData.custrecord_sgp_pb_currency_end_date
         );
 
-        const headers = ['CAT', 'PRODUCT', 'DESCRIPTION', 'TYPE', '# RECIPES', 'CODE DESCRIPTION', 'CUST', 'CUSTOMER NAME',
-            'TOTAL UNITS', '+ -', 'FOB COST', 'LANDED COST', 'LOC1 OH UNITS', 'LOC2 OH UNITS',
-            'PO QTY', 'PO RECEIVED', 'PREP PRODUCTION'];
-
+        // El preview siempre manda el set completo de headers; el checkbox
+        // "Show item cost" oculta/muestra FOB COST/LANDED COST client-side
+        // (ver prbk_sl_reports_shell.js → buildPreviewFragment / hideColumns).
         return {
             title: 'Hardgoods Buying Report',
             prebookName: preebookData.name || prebookId,
@@ -182,7 +208,7 @@ define([
                 `History: ${preebookData.custrecord_sgp_pb_historical_start_date} - ${preebookData.custrecord_sgp_pb_historical_end_date}`,
                 `Current: ${preebookData.custrecord_sgp_pb_current_start_date} - ${preebookData.custrecord_sgp_pb_currency_end_date}`
             ],
-            headers: headers,
+            headers: ALL_HEADERS,
             rows: buildHardgoodsPreviewRows(bomRows),
             rowCount: bomRows.length
         };
@@ -207,7 +233,7 @@ define([
 
             if (recipes.length > 0) {
                 cells.push(
-                    first.recipe_code + (first.recipedescription ? ' - ' + first.recipedescription : ''),
+                    first.recipe_code + ((first.recipedescription || '').trim() ? ' - ' + first.recipedescription : ''),
                     safeStr(first.customer_code),
                     safeStr(first.customer_name),
                     fmtNumber(row.totalUnits),
@@ -227,7 +253,7 @@ define([
             const toSubRow = (recipe) => ({
                 cells: [
                     '', '', '', '', '',
-                    recipe.recipe_code + (recipe.recipedescription ? ' - ' + recipe.recipedescription : ''),
+                    recipe.recipe_code + ((recipe.recipedescription || '').trim() ? ' - ' + recipe.recipedescription : ''),
                     safeStr(recipe.customer_code),
                     safeStr(recipe.customer_name),
                     '', '', '', '', '', '', '', '', ''
@@ -260,8 +286,10 @@ define([
     // Límite real de file.create en NetSuite es 10 MB; dejamos margen.
     const MAX_XLS_BYTES = 9.8 * 1024 * 1024;
 
-    const crearExcel = (headers, rows, fileName, prebookId, preebookData) => {
+    const crearExcel = (headers, rows, fileName, prebookId, preebookData, showItemCost) => {
         try {
+            const showCost = showItemCost !== false;
+            const costHidden = showCost ? '' : ' ss:Hidden="1"';
 
             // Escapan XML (&, <, >); isEmptyValue blinda contra ScriptNullObjectAdapter.
             const escapeXml = (v) => isEmptyValue(v) ? '' :
@@ -315,21 +343,22 @@ define([
                 '<Worksheet ss:Name="Hoja1">\n' +
                 '<Table ss:ExpandedColumnCount="' + (headers.length + 2) + '" ss:ExpandedRowCount="' + rows.length + 100 + '" x:FullColumns="1"\n' +
                 'x:FullRows="1" ss:DefaultRowHeight="14.4">\n' +
-                '<Column ss:Width="22.799999999999997"/>\n' +
-                '<Column ss:Width="49.2"/>\n' +
-                '<Column ss:AutoFitWidth="0" ss:Width="141.6"/>\n' +
-                '<Column ss:Width="103.2"/>\n' +
-                '<Column ss:Width="49.2"/>\n' +
-                '<Column ss:Width="120.60000000000001"/>\n' +
-                '<Column ss:Width="28.8"/>\n' +
-                '<Column ss:Width="87"/>\n' +
-                '<Column ss:Width="64.2"/>\n' +
-                '<Column ss:Width="24"/>\n' +
-                '<Column ss:Width="49.2"/>\n' +
-                '<Column ss:Width="67.8"/>\n' +
-                '<Column ss:Width="75" ss:Span="1"/>\n' +
+                '<Column ss:Index="1" ss:Width="22.799999999999997"/>\n' +
+                '<Column ss:Index="2" ss:Width="49.2"/>\n' +
+                '<Column ss:Index="3" ss:AutoFitWidth="0" ss:Width="141.6"/>\n' +
+                '<Column ss:Index="4" ss:Width="103.2"/>\n' +
+                '<Column ss:Index="5" ss:Width="49.2"/>\n' +
+                '<Column ss:Index="6" ss:Width="120.60000000000001"/>\n' +
+                '<Column ss:Index="7" ss:Width="28.8"/>\n' +
+                '<Column ss:Index="8" ss:Width="87"/>\n' +
+                '<Column ss:Index="9" ss:Width="64.2"/>\n' +
+                '<Column ss:Index="10" ss:Width="24"/>\n' +
+                '<Column ss:Index="11" ss:Width="49.2"' + costHidden + '/>\n' +
+                '<Column ss:Index="12" ss:Width="67.8"' + costHidden + '/>\n' +
+                '<Column ss:Index="13" ss:Width="75"/>\n' +
+                '<Column ss:Index="14" ss:Width="75"/>\n' +
                 '<Column ss:Index="15" ss:Width="38.4"/>\n' +
-                '<Column ss:Width="91.8"/>\n' +
+                '<Column ss:Index="16" ss:Width="91.8"/>\n' +
                 '<Row>\n' +
                 '<Cell ss:Index="4" ss:StyleID="sPlain"><Data ss:Type="String">WO720 Report # ' + escapeXml(prebookId) + '</Data></Cell>\n' +
                 '<Cell ss:Index="6" ss:StyleID="sPlain"><Data ss:Type="String">WHERE USED REPORTING</Data></Cell>\n' +
@@ -358,7 +387,7 @@ define([
                 xmlString += strCell(row.type);
                 xmlString += numCell(row.num_recipes);
                 if (row.recipes.length > 0) {
-                    xmlString += strCell(firstRecipe.recipe_code + (firstRecipe.recipedescription ? " - " : "") + firstRecipe.recipedescription);
+                    xmlString += strCell(firstRecipe.recipe_code + ((firstRecipe.recipedescription || '').trim() ? " - " : "") + firstRecipe.recipedescription);
                     xmlString += strCell(firstRecipe.customer_code);
                     xmlString += strCell(firstRecipe.customer_name);
                     xmlString += strCell(fmtNumber(row.totalUnits));
@@ -377,7 +406,7 @@ define([
                         if (index === 0) return; // ya impresa en la fila principal
                         xmlString += '<Row>';
                         xmlString += EMPTY + EMPTY + EMPTY + EMPTY + EMPTY;
-                        xmlString += strCell(recipe.recipe_code + (recipe.recipedescription ? " - " : "") + recipe.recipedescription);
+                        xmlString += strCell(recipe.recipe_code + ((recipe.recipedescription || '').trim() ? " - " : "") + recipe.recipedescription);
                         xmlString += strCell(recipe.customer_code);
                         xmlString += strCell(recipe.customer_name);
                         xmlString += EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY;
@@ -450,7 +479,7 @@ define([
     };
 
     /** Genera el PDF a partir de la plantilla FTL del File Cabinet. */
-    const crearPDF = (headers, rows, fileName, prebookId, preebookData) => {
+    const crearPDF = (headers, rows, fileName, prebookId, preebookData, showItemCost) => {
         try {
             const templateFileId = findTemplateFileId(HG_TEMPLATE_FILENAME);
             if (!templateFileId) {
@@ -489,7 +518,15 @@ define([
                         currentStart: preebookData.custrecord_sgp_pb_current_start_date || '',
                         currentEnd: preebookData.custrecord_sgp_pb_currency_end_date || '',
                         generatedAt: nowStamp(),
-                        totalRows: rows.length
+                        totalRows: rows.length,
+                        // 'T'/'F' en vez de boolean: igual que el bug ya resuelto de
+                        // ?string/?is_number (ver R1 PDF sin formato), un boolean JSON
+                        // llega al data source de FreeMarker sin garantía de tipo —
+                        // <#if showItemCost> podía evaluar mal (o tirar error) cuando
+                        // venía false, dejando de renderizar TODAS las filas del <tbody>
+                        // (el <thead> ya se había pintado antes del loop). Comparando
+                        // contra el string 'T' se evita esa ambigüedad de tipo.
+                        showItemCost: (showItemCost !== false) ? 'T' : 'F'
                     }
                 })
             });
@@ -767,6 +804,11 @@ define([
             // ── 4. Metadata de las Bill of Materials padre ────────────────
             //      Customer solo si está activo (join condicionado); si está
             //      inactivo, la receta se muestra igual sin nombre/código.
+            //      customer_name (Altname): si el customer tiene marcado
+            //      custentity_sgp_consolidateprebook Y TIENE parent, se toma el
+            //      Altname del parent (jerarquía); si el check está marcado pero
+            //      NO tiene parent, o si no está marcado, se usa el Altname del
+            //      mismo customer (fallback vía parentcust.altname IS NOT NULL).
             //      CODE / DESCRIPTION: recipe_code siempre es b.name (BOM name).
             //      La descripción sale de customrecord_sgp_recipe_product_mgt,
             //      matcheado contra b.name comparando solo la parte ANTES del
@@ -785,9 +827,14 @@ define([
                         b.name                              AS recipe_code,
                         prm.custrecord_sgp_prm_description   AS recipe_description,
                         cust.entityid                       AS customer_code,
-                        cust.altname                        AS customer_name
+                        CASE WHEN cust.custentity_sgp_consolidateprebook = 'T'
+                              AND parentcust.altname IS NOT NULL
+                             THEN parentcust.altname
+                             ELSE cust.altname
+                        END                                  AS customer_name
                     FROM Bom b
                     LEFT JOIN Customer cust ON cust.id = b.custrecord_sgp_bom_customer AND cust.isinactive = 'F'
+                    LEFT JOIN Customer parentcust ON parentcust.id = cust.parent
                     LEFT JOIN customrecord_sgp_recipe_product_mgt prm
                         ON TRIM(CASE WHEN INSTR(prm.name, '(') > 0
                                      THEN SUBSTR(prm.name, 1, INSTR(prm.name, '(') - 1)
@@ -906,7 +953,10 @@ define([
                     const recipeProjectedQty = projectionQtyByAssembly[assemblyItemId] || 0;
                     return {
                         recipeId: bomId,
-                        recipe_code: meta.recipe_code || '',
+                        // Código a mostrar (CODE DESCRIPTION): sin el sufijo "(xx)" que
+                        // algunos b.name traen (ver stripRecipeCodeSuffix). Único punto
+                        // donde se arma `recipes`, así queda limpio para preview/Excel/PDF.
+                        recipe_code: stripRecipeCodeSuffix(meta.recipe_code),
                         recipedescription: meta.recipe_description || '',
                         customer_code: meta.customer_code || '',
                         customer_name: meta.customer_name || '',
@@ -983,6 +1033,15 @@ define([
         const [intPart, decPart] = fixed.split('.');
         const withCommas = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
         return (neg ? '-' : '') + withCommas + (decPart ? '.' + decPart : '');
+    };
+
+    /** Quita el sufijo "(xx)" (y el espacio previo) de un recipe_code (b.name) para
+     *  mostrarlo limpio en CODE DESCRIPTION. Solo afecta el display; el match contra
+     *  customrecord_sgp_recipe_product_mgt ya se hace en el SQL de fase 4 (SUBSTR). */
+    const stripRecipeCodeSuffix = (code) => {
+        const s = String(code || '');
+        const idx = s.indexOf('(');
+        return (idx > -1 ? s.substring(0, idx) : s).trim();
     };
 
     /** Mapea el type interno de NetSuite al texto legible del reporte. */

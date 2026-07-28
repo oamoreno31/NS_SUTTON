@@ -454,6 +454,24 @@ define([
                 return `<button type="button" class="${cls}" onclick="pbDownload('${escapeHtml(opt.value)}')">${icon}&nbsp;&nbsp;Download ${escapeHtml(opt.text)}</button>`;
             }).join('\n') : '';
 
+        // Checkboxes previewChoice genéricos (p.ej. "Show item cost" en R1): ocultan/
+        // muestran, en el preview, las columnas cuyo header calce con def.hideColumns.
+        // El valor viaja al server en el mismo hidden field que usa pbDownload/generate.
+        const toggleDefs = filters.filter((def) => def.previewChoice &&
+            String(def.type || '').toLowerCase() === 'checkbox' && Array.isArray(def.hideColumns) && def.hideColumns.length);
+        const toggleHtml = toggleDefs.map((def) => {
+            const fieldId = FLD_FILTER_PREFIX + def.id;
+            const colIdx = def.hideColumns
+                .map((h) => previewData.headers.findIndex((hh) => String(hh).toUpperCase() === String(h).toUpperCase()))
+                .filter((i) => i !== -1)
+                .map((i) => i + 1);
+            const submittedVal = filterValues[def.id];
+            const checked = (submittedVal !== undefined && submittedVal !== '')
+                ? submittedVal === 'T'
+                : String(def.defaultValue || 'T') === 'T';
+            return `<label class="pb-cost-toggle"><input type="checkbox" ${checked ? 'checked' : ''} onchange="pbToggleColumns(this,'${escapeHtml(fieldId)}',[${colIdx.join(',')}])"> ${escapeHtml(def.label || def.id)}</label>`;
+        }).join('\n');
+
         const rows = (previewData.rows || []).map(normalizePreviewRow);
         const totalPages = Math.max(1, Math.ceil(rows.length / PREVIEW_PAGE_SIZE));
         const colCount = previewData.headers.length;
@@ -516,8 +534,11 @@ define([
     ${metaLinesHtml ? `<div class="pb-meta-block">${metaLinesHtml}</div>` : ''}
 
     <div class="pb-download-bar">
-        <span class="pb-download-label">Download this report:</span>
-        ${downloadButtons || '<span class="pb-muted">No downloadable formats configured for this report.</span>'}
+        <div class="pb-download-row">
+            <span class="pb-download-label">Download this report:</span>
+            ${downloadButtons || '<span class="pb-muted">No downloadable formats configured for this report.</span>'}
+        </div>
+        ${toggleHtml ? `<div class="pb-cost-toggle-row">${toggleHtml}</div>` : ''}
     </div>
 
     <div class="pb-toolbar">
@@ -549,6 +570,24 @@ define([
     var totalPages = ${totalPages};
     var currentPage = 1;
     var searching = false;
+
+    window.pbToggleColumns = function (checkbox, hiddenFieldId, colIndexes) {
+        var hiddenEl = document.getElementById(hiddenFieldId);
+        if (hiddenEl) hiddenEl.value = checkbox.checked ? 'T' : 'F';
+        var styleId = 'pbColStyle_' + hiddenFieldId.replace(/[^a-zA-Z0-9]/g, '');
+        var styleEl = document.getElementById(styleId);
+        if (!styleEl) {
+            styleEl = document.createElement('style');
+            styleEl.id = styleId;
+            document.head.appendChild(styleEl);
+        }
+        styleEl.textContent = checkbox.checked ? '' : (colIndexes || []).map(function (i) {
+            return '#pbPreviewTable th:nth-child(' + i + '), #pbPreviewTable td:nth-child(' + i + ') { display: none; }';
+        }).join('\\n');
+    };
+    root.querySelectorAll('.pb-cost-toggle input[type=checkbox]').forEach(function (cb) {
+        if (!cb.checked) cb.dispatchEvent(new Event('change'));
+    });
 
     function isExpanded(group) {
         var t = root.querySelector('.pb-toggle-row[data-group="' + group + '"]');
@@ -981,12 +1020,24 @@ define([
         }
         #pb-preview-root .pb-meta-line { font-size: 12px; color: var(--pb-muted); line-height: 1.6; }
         #pb-preview-root .pb-download-bar {
-            display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+            display: flex; flex-direction: column; gap: 8px;
             background: var(--pb-card); border: 1px solid var(--pb-border);
             border-radius: 10px; padding: 10px 14px; margin-bottom: 10px;
         }
+        #pb-preview-root .pb-download-row {
+            display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+        }
         #pb-preview-root .pb-download-label { font-weight: 600; margin-right: 4px; }
         #pb-preview-root .pb-muted { color: var(--pb-muted); font-size: 12px; }
+        #pb-preview-root .pb-cost-toggle-row {
+            display: flex; align-items: center; flex-wrap: wrap;
+            padding-top: 8px; border-top: 1px solid var(--pb-border);
+        }
+        #pb-preview-root .pb-cost-toggle {
+            display: flex; align-items: center; gap: 6px;
+            font-size: 13px; color: var(--pb-muted); cursor: pointer;
+        }
+        #pb-preview-root .pb-cost-toggle input { cursor: pointer; }
         #pb-preview-root .pb-toolbar {
             display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 8px;
         }
