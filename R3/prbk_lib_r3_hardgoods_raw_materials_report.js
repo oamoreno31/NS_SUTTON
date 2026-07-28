@@ -529,6 +529,15 @@ define([
             log.audit('HG_RM.loadHardgoodsRawMaterials', `Ítems HARDGOODS: ${results_hg.length}`);
             const hardgoodsItemIds = results_hg.map((r) => String(r.item));
 
+            // "preferredVendor" (join → Vendor.altname) no existe como columna
+            // escalar en SuiteQL (N/query) — confirmado con N/search, donde SÍ es
+            // un join válido del record item. Se resuelve acá con N/search en vez
+            // de SQL.
+            phase = '1b-preferred vendor (N/search)';
+            const preferredVendorAltnameByItem = loadPreferredVendorAltnameByItem(hardgoodsItemIds);
+            log.audit('HG_RM.loadHardgoodsRawMaterials',
+                `Preferred vendor (N/search): ${Object.keys(preferredVendorAltnameByItem).length} de ${hardgoodsItemIds.length} ítems con vendor.`);
+
             phase = '2-explosion 2 niveles + fechas + inactivos';
             const revisionDataByItem = {};
             const bomIdByRevision = {};
@@ -747,7 +756,9 @@ define([
                     inBound: inBound,
                     casesShort: casesShort,
                     casesOver: casesOver,
-                    vendor: safeStr(r.vendor_name),
+                    // Prioridad: preferredVendor.altname (N/search, fase 1b) →
+                    // itm.vendorname (valor actual) → vacío si ninguno resuelve.
+                    vendor: safeStr(preferredVendorAltnameByItem[itemId]) || safeStr(r.vendor_name) || '',
                     subcategory: safeStr(r.subcategory),
                     componentItemId: itemId,
                     packing: packing,
@@ -855,6 +866,62 @@ define([
             if (inList) out.push(inList);
         }
         return out;
+    };
+
+    /**
+     * Vendor preferido por ítem (Altname), vía join "preferredVendor" del record
+     * item — no existe como columna escalar en SuiteQL (N/query, ver comentario en
+     * loadHardgoodsRawMaterials), así que se resuelve puntualmente con N/search,
+     * igual que el ejemplo de saved search provisto:
+     *   search.create({ type: 'item', filters: [['vendor','noneof','@NONE@']],
+     *                    columns: ['itemid', {name:'altname', join:'preferredVendor'}] })
+     *
+     * Cuidado con governance: se agrupan los IDs en bloques de 1000 (mismo límite
+     * práctico que chunkIds usa para los IN() de SQL) para minimizar la cantidad
+     * de búsquedas ejecutadas, y se pagina con runPaged/fetch (no .run().each,
+     * que reconsulta página por página de forma menos previsible en costo) igual
+     * que loadAssemblyBoms/getOnHandAllLocations en prbk_lib_reports_common.js.
+     * El filtro "vendor noneof @NONE@" además evita traer/parsear ítems sin
+     * ningún vendor asociado, achicando el resultado.
+     *
+     * @param {Array<string>} itemIds
+     * @returns {Object} { itemId: altname }
+     */
+    const loadPreferredVendorAltnameByItem = (itemIds) => {
+        const map = {};
+        const ids = Array.from(new Set((itemIds || []).filter(Boolean).map(String)));
+        if (!ids.length) return map;
+
+        const CHUNK_SIZE = 1000;
+        for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
+            const chunk = ids.slice(i, i + CHUNK_SIZE);
+            try {
+                const itemSearchObj = search.create({
+                    type: search.Type.ITEM,
+                    filters: [
+                        ['internalid', 'anyof', chunk], 'AND',
+                        ['vendor', 'noneof', '@NONE@']
+                    ],
+                    columns: [
+                        search.createColumn({ name: 'internalid', label: 'ITEM' }),
+                        search.createColumn({ name: 'altname', join: 'preferredVendor', label: 'PREFERRED_VENDOR_ALTNAME' })
+                    ]
+                });
+
+                const paged = itemSearchObj.runPaged({ pageSize: 1000 });
+                paged.pageRanges.forEach((pr) => {
+                    paged.fetch({ index: pr.index }).data.forEach((r) => {
+                        const itemId = r.getValue({ name: 'internalid' });
+                        const altname = r.getValue({ name: 'altname', join: 'preferredVendor' });
+                        if (itemId && altname) map[String(itemId)] = String(altname);
+                    });
+                });
+            } catch (e) {
+                log.error('HG_RM.loadPreferredVendorAltnameByItem',
+                    `Falló búsqueda de preferred vendor (bloque ${Math.floor(i / CHUNK_SIZE) + 1}): ${e.message}`);
+            }
+        }
+        return map;
     };
 
     return {

@@ -52,6 +52,16 @@
         .ctr { text-align: center; }
         .txt { text-align: left; }
 
+        /* ── Separador punteado al final de cada subcategoría ─────────── */
+        tr.subcat-sep-row td {
+            border: none;
+            border-bottom: 1px dotted #000000;
+            padding: 0;
+            height: 1px;
+            line-height: 1px;
+            font-size: 1px;
+        }
+
         table.footer-table { width: 100%; font-size: 6pt; color: #555555; }
 
         .empty-msg { font-size: 9pt; font-style: italic; padding-top: 20px; }
@@ -99,6 +109,13 @@
             </tr>
         </thead>
 
+        <#-- Total de columnas para colspan (separador y mensaje vacío). Se calcula
+             con paréntesis explícitos: "(data.headers)![]?size" se parseaba mal
+             (el ?size quedaba pegado al "![]" antes de aplicarse el default),
+             terminando por interpolar la lista completa de headers en vez de su
+             tamaño y rompiendo el render del PDF. -->
+        <#assign colCount = ((data.headers)![])?size>
+
         <tbody>
             <#if (data.report?? && data.report?size > 0)>
                 <#list data.report as row>
@@ -117,9 +134,24 @@
                         <td class="num">${(row.casesShort!"")?xml}</td>
                         <td class="num">${(row.casesOver!"")?xml}</td>
                     </tr>
+                    <#-- Separador punteado al cierre de cada subcategoría: las filas
+                         vienen ordenadas por categoría/subcategoría (fase 9 del JS,
+                         printingSeq → subcatCode → description), así que "row.cat"
+                         (catCode + subcatCode) cambia justo quiebre de subcategoría.
+                         Se compara contra la fila siguiente; sin fila siguiente
+                         (última del reporte) también se dibuja. -->
+                    <#assign curCat = (row.cat)!''>
+                    <#if row_has_next>
+                        <#assign nextCat = (data.report[row_index + 1].cat)!''>
+                    <#else>
+                        <#assign nextCat = ''>
+                    </#if>
+                    <#if curCat != nextCat>
+                        <tr class="subcat-sep-row"><td colspan="${colCount}">&nbsp;</td></tr>
+                    </#if>
                 </#list>
             <#else>
-                <tr><td colspan="13" class="empty-msg" align="center">No greens data to display for this Prebook.</td></tr>
+                <tr><td colspan="${colCount}" class="empty-msg" align="center">No greens data to display for this Prebook.</td></tr>
             </#if>
         </tbody>
     </table>

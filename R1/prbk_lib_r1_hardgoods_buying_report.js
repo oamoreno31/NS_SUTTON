@@ -236,7 +236,7 @@ define([
                     first.recipe_code + ((first.recipedescription || '').trim() ? ' - ' + first.recipedescription : ''),
                     safeStr(first.customer_code),
                     safeStr(first.customer_name),
-                    fmtNumber(row.totalUnits),
+                    fmtNumber(row.totalUnits),  // TOTAL UNITS (suma de todas las recetas)
                     fmtNumber(row.plus_minus),             // "+ -": LOC1 + PO QTY - TOTAL UNITS
                     String(row.fob_cost || 0),
                     String(row.landed_cost || 0),
@@ -256,7 +256,7 @@ define([
                     recipe.recipe_code + ((recipe.recipedescription || '').trim() ? ' - ' + recipe.recipedescription : ''),
                     safeStr(recipe.customer_code),
                     safeStr(recipe.customer_name),
-                    '', '', '', '', '', '', '', '', ''
+                    /**fmtNumber(recipe.subTotalUnits) */'', '', '', '', '', '', '', ''
                 ],
                 // Solo display (toggle "See all sub total units"): total units de esta receta.
                 subTotalUnits: recipe.subTotalUnits != null ? fmtNumber(recipe.subTotalUnits) : ''
@@ -672,21 +672,6 @@ define([
 
             const hardgoodsItemIds = hardgoodsItems.map((it) => String(it.item_id));
 
-            // ── 2. Explosión de 2 niveles (igual que pa_sl_bom_explosion_ui.js) ──
-            //      SELECT DISTINCT: mismo resguardo que usa pa_sl_bom_explosion_ui.js
-            //      contra filas duplicadas por fan-out de itemAssemblyItemBom (un BOM
-            //      puede estar referenciado por más de un ítem ensamblado).
-            //      Nivel 1: bom → bomRevisionBomMap → bomRevision → bomRevisionComponentMember.
-            //      Nivel 2 (solo si comp.itemsource es WORK_ORDER/PHANTOM): se repite
-            //      la cadena partiendo de comp.item como "assembly" (sub_iaib/sub_bom/
-            //      sub_map/sub_bomRev/subcomp) para llegar al material real.
-            //      item_id final = subcomp.item si hay 2do nivel, si no comp.item.
-            //      bom_quantity = comp.bomquantity × subcomp.bomquantity (× 1 si no
-            //      hay 2do nivel) = "total_componente" de BOM Explosion.
-            //      Filtrado ya en SQL: activos + rango CURRENT (solo nivel 1) +
-            //      BOM/BomRevision nivel 1 con '*' excluidos + material final
-            //      dentro de hardgoodsItemIds + WORK_ORDER/PHANTOM sin sub-BOM
-            //      se descarta (igual que BOM Explosion).
             phase = '2-explosion 2 niveles + fechas + inactivos';
             const revisionDataByItem = {};   // itemId → { revisionId: bomquantity (sumado) }
             const bomIdByRevision = {};      // revisionId → bomId (siempre nivel 1)
@@ -705,12 +690,7 @@ define([
                 dateParams.push(currentStartIso);
             }
             const dateWhereSql = dateConds.length ? ' AND ' + dateConds.join(' AND ') : '';
-            // Diagnóstico: si currentStart/currentEnd llegan vacíos del Prebook, o si
-            // ambos parsean a null, dateWhereSql queda '' y NO se filtra por fecha —
-            // cualquier BomRevision con effectivestartdate/enddate NULL en ambos
-            // extremos tampoco se filtra nunca (la condición "IS NULL OR ..." la deja
-            // pasar siempre). Esto es lo primero a revisar si aparecen demasiadas
-            // recetas para un mismo ítem.
+            
             log.audit('HARDGOODS.loadHardgoodsBomList',
                 `Fechas CURRENT del Prebook: raw=[${currentStart} - ${currentEnd}] → ISO=[${currentStartIso} - ${currentEndIso}] → ` +
                 (dateWhereSql ? 'filtro SQL aplicado' : 'SIN FILTRO DE FECHA (fechas vacías o no parseables) — trae TODAS las revisiones activas'));
@@ -800,24 +780,6 @@ define([
                     };
                 });
             });
-
-            // ── 4. Metadata de las Bill of Materials padre ────────────────
-            //      Customer solo si está activo (join condicionado); si está
-            //      inactivo, la receta se muestra igual sin nombre/código.
-            //      customer_name (Altname): si el customer tiene marcado
-            //      custentity_sgp_consolidateprebook Y TIENE parent, se toma el
-            //      Altname del parent (jerarquía); si el check está marcado pero
-            //      NO tiene parent, o si no está marcado, se usa el Altname del
-            //      mismo customer (fallback vía parentcust.altname IS NOT NULL).
-            //      CODE / DESCRIPTION: recipe_code siempre es b.name (BOM name).
-            //      La descripción sale de customrecord_sgp_recipe_product_mgt,
-            //      matcheado contra b.name comparando solo la parte ANTES del
-            //      paréntesis (algunos name traen "(xx)" y otros no, pero esa
-            //      parte siempre es igual) — cubre match exacto y con sufijo
-            //      en cualquiera de los dos lados. Sin coincidencia,
-            //      recipe_description queda vacío y el front solo muestra el
-            //      nombre del BOM (mismo comportamiento ya existente para "sin
-            //      descripción").
             phase = '4-bom meta';
             const bomMeta = {};   // bomId → { recipe_code, recipe_description, customer_code, customer_name }
             chunkIds(bomIds, 1000).forEach((inList) => {
@@ -945,7 +907,7 @@ define([
                 // TOTAL UNITS = suma de subTotalUnits entre todas las recetas
                 // (mismo "agregar por componente, sumar entre styles" del diagrama,
                 // extendido a que el material puede estar en varias recetas).
-                const recipes = Object.keys(bestRevByBom).map((bomId) => {
+                let recipes = Object.keys(bestRevByBom).map((bomId) => {
                     const meta = bomMeta[bomId] || {};
                     const bomQuantity = bestRevByBom[bomId].bomquantity || 0;
                     const assemblyItemId = assemblyItemByBom[bomId];
@@ -961,10 +923,13 @@ define([
                         customer_code: meta.customer_code || '',
                         customer_name: meta.customer_name || '',
                         // Total units de ESTA receta: participa en TOTAL UNITS (suma abajo).
-                        subTotalUnits: recipeProjectedQty * bomQuantity
+                        subTotalUnits: recipeProjectedQty,
+                        bomQuantity: bomQuantity
                     };
                 }).sort((a, b) => String(a.recipe_code).localeCompare(String(b.recipe_code)));
 
+                recipes = recipes.filter((r) => r.subTotalUnits > 0)
+                recipes = recipes.sort((a, b) => b.subTotalUnits - a.subTotalUnits)
                 const totalUnits = recipes.reduce((sum, r) => sum + (r.subTotalUnits || 0), 0);
 
                 // TOTAL UNITS = 0 (sin proyección real en ninguna receta) → el ítem no se muestra.
@@ -994,7 +959,8 @@ define([
                     po_received: po.po_received,
                     totalUnits: totalUnits,
                     recipes: recipes,
-                    num_recipes: recipes.length
+                    num_recipes: recipes.length,
+                    bomQuantity: recipes.reduce((sum, r) => 0 + (r.bomQuantity || 0), 0)
                 });
             });
 
