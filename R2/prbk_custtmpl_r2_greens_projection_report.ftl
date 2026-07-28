@@ -39,6 +39,9 @@
             padding: 2px;
             text-align: center;
             background: transparent;
+            font-size: 6pt;
+            line-height: 8pt;
+            white-space: normal;
         }
         table.report-plain td {
             border: none;
@@ -73,9 +76,9 @@
 
     <table class="report-plain">
         <colgroup>
-            <col width="6%"/>
             <col width="9%"/>
-            <col width="19%"/>
+            <col width="8%"/>
+            <col width="17%"/>
             <col width="7%"/>
             <col width="8%"/>
             <col width="8%"/>
@@ -91,7 +94,7 @@
         <thead>
             <tr>
                 <#list (data.headers)![] as h>
-                    <th>${(h!"")?xml}</th>
+                    <th>${(h!"")?xml?replace(" ", "<br/>")}</th>
                 </#list>
             </tr>
         </thead>

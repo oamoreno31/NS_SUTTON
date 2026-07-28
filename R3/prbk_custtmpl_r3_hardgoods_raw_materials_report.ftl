@@ -37,6 +37,9 @@
             font-weight: bold;
             padding: 2px;
             text-align: center;
+            font-size: 6pt;
+            line-height: 8pt;
+            white-space: normal;
         }
         table.report td {
             border: 0.5px solid #000000;
@@ -57,6 +60,9 @@
             padding: 2px;
             text-align: center;
             background: transparent;
+            font-size: 6pt;
+            line-height: 8pt;
+            white-space: normal;
         }
         table.report-plain td {
             border: none;
@@ -118,9 +124,9 @@
     <#assign tableClass = isMainView?then("report", "report-plain")>
     <table class="${tableClass}">
         <colgroup>
-            <col width="6%"/>
-            <col width="8%"/>
-            <col width="18%"/>
+            <col width="9%"/>
+            <col width="7%"/>
+            <col width="16%"/>
             <col width="7%"/>
             <col width="8%"/>
             <col width="8%"/>
@@ -136,7 +142,7 @@
         <thead>
             <tr>
                 <#list (data.headers)![] as h>
-                    <th>${(h!"")?xml}</th>
+                    <th>${(h!"")?xml?replace(" ", "<br/>")}</th>
                 </#list>
             </tr>
         </thead>

@@ -593,6 +593,8 @@ define([
                 if (poReceived > 0) itemsWithPoReceived++;
                 if (unitprepcomp > 0) itemsWithPrep++;
 
+                if (stemsNeeded === 0 && bunchesNeeded === 0) return;
+
                 const catCode = r.category_code || r.category_name || '';
                 const subcatCode = safeStr(r.subcat_code);
                 rows.push({
@@ -619,9 +621,9 @@ define([
 
             rows.sort((a, b) => {
                 if (a.printingSeq !== b.printingSeq) return a.printingSeq - b.printingSeq;
-                const sc = String(a.subcatCode || '').localeCompare(String(b.subcatCode || ''));
+                const sc = compareSubcat(a.subcatCode, b.subcatCode);
                 if (sc !== 0) return sc;
-                return String(a.productCode).localeCompare(String(b.productCode));
+                return String(a.description || '').localeCompare(String(b.description || ''));
             });
 
             log.audit('GREENS.loadBomComponents',
@@ -659,6 +661,17 @@ define([
     };
 
     const safeStr = (v) => (isEmptyValue(v) ? '' : String(v));
+
+    const compareSubcat = (a, b) => {
+        const sa = safeStr(a);
+        const sb = safeStr(b);
+        const na = Number(sa);
+        const nb = Number(sb);
+        const aIsNum = sa !== '' && !isNaN(na);
+        const bIsNum = sb !== '' && !isNaN(nb);
+        if (aIsNum && bIsNum) return na - nb;
+        return sa.localeCompare(sb);
+    };
 
     const parseAccountDate = (v) => {
         const s = safeStr(v);

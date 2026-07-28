@@ -949,12 +949,12 @@ define([
             });
 
             // Orden del reporte: Category Sequence (custrecord_sgp_categoty_printing_seq,
-            // ascendente, sin valor → al final) y luego Product Code ascendente.
+            // ascendente, sin valor → al final) y luego Product Description ascendente.
             rows.sort((a, b) => {
                 const seqA = a.categorySeq == null ? Number.MAX_SAFE_INTEGER : a.categorySeq;
                 const seqB = b.categorySeq == null ? Number.MAX_SAFE_INTEGER : b.categorySeq;
                 if (seqA !== seqB) return seqA - seqB;
-                return String(a.product).localeCompare(String(b.product));
+                return String(a.description || '').localeCompare(String(b.description || ''));
             });
 
             log.audit('HARDGOODS.loadHardgoodsBomList', `Filas generadas: ${rows.length}`);
@@ -989,7 +989,7 @@ define([
     const mapItemType = (nsType) => {
         const MAP = {
             InvtPart: 'Inventory',
-            Assembly: 'Assembly',
+            Assembly: 'RAW',
             NonInvtPart: 'Non-Inventory',
             OthCharge: 'Other Charge',
             Service: 'Service',

@@ -197,9 +197,9 @@ define([
         if (sq !== 0) return sq;
         const v = String(a.vendor || '').localeCompare(String(b.vendor || ''));
         if (v !== 0) return v;
-        const s = String(a.subcategory || '').localeCompare(String(b.subcategory || ''));
+        const s = compareSubcat(a.subcategory, b.subcategory);
         if (s !== 0) return s;
-        return String(a.productCode || '').localeCompare(String(b.productCode || ''));
+        return String(a.description || '').localeCompare(String(b.description || ''));
     });
 
     const groupByCategory = (rows) => {
@@ -213,7 +213,7 @@ define([
         groups.forEach((g) => g.rows.sort((a, b) => {
             const sq = seqOf(a) - seqOf(b);
             if (sq !== 0) return sq;
-            return String(a.productCode || '').localeCompare(String(b.productCode || ''));
+            return String(a.description || '').localeCompare(String(b.description || ''));
         }));
         groups.sort((a, b) => {
             const seqA = a.seq == null ? Number.MAX_SAFE_INTEGER : a.seq;
@@ -235,9 +235,9 @@ define([
         groups.forEach((g) => g.rows.sort((a, b) => {
             const sq = seqOf(a) - seqOf(b);
             if (sq !== 0) return sq;
-            const p = String(a.productCode || '').localeCompare(String(b.productCode || ''));
+            const p = String(a.description || '').localeCompare(String(b.description || ''));
             if (p !== 0) return p;
-            return String(a.subcategory || '').localeCompare(String(b.subcategory || ''));
+            return compareSubcat(a.subcategory, b.subcategory);
         }));
         groups.sort((a, b) => String(a.label).localeCompare(String(b.label)));
         return groups;
@@ -726,6 +726,8 @@ define([
                 if (poReceived > 0) itemsWithPoReceived++;
                 if (unitprepcomp > 0) itemsWithPrep++;
 
+                if (unitsNeeded === 0 && bunchesNeeded === 0) return;
+
                 const catCode = r.category_code || r.category_name || '';
                 const subcatCode = safeStr(r.subcat_code);
                 rows.push({
@@ -788,6 +790,17 @@ define([
     };
 
     const safeStr = (v) => (isEmptyValue(v) ? '' : String(v));
+
+    const compareSubcat = (a, b) => {
+        const sa = safeStr(a);
+        const sb = safeStr(b);
+        const na = Number(sa);
+        const nb = Number(sb);
+        const aIsNum = sa !== '' && !isNaN(na);
+        const bIsNum = sb !== '' && !isNaN(nb);
+        if (aIsNum && bIsNum) return na - nb;
+        return sa.localeCompare(sb);
+    };
 
     const parseAccountDate = (v) => {
         const s = safeStr(v);
