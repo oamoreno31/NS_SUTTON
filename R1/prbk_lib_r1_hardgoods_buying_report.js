@@ -36,6 +36,19 @@ define([
     const getPdfHeaders = (showItemCost) =>
         showItemCost ? ALL_HEADERS : ALL_HEADERS.filter((h) => COST_HEADERS.indexOf(h) === -1);
 
+    /** true si se debe mostrar el detalle de auditoría por receta (checkbox
+     *  "Show recipe audit", desmarcado por defecto): revela, en la sub-fila de
+     *  cada receta adicional, su propia proyección (recipe.subTotalUnits) en la
+     *  columna TOTAL UNITS — hoy esa celda va en blanco. A diferencia de
+     *  "Show item cost" (que oculta/muestra una columna ENTERA vía hideColumns),
+     *  este checkbox no oculta ninguna columna (la fila principal ya usa esa
+     *  misma columna para el total agregado); solo revela un valor puntual ya
+     *  calculado. Por eso el shell lo trata como un toggle "refresh" (reenvía el
+     *  preview completo) y no como un toggle instantáneo client-side — ver
+     *  prbk_sl_reports_shell.js → pbSetHiddenAndRefresh. */
+    const isShowRecipeAudit = (filterValues) =>
+        String((filterValues || {}).show_recipe_audit || 'F').toUpperCase() === 'T';
+
     // =========================================================================
     // 1. METADATA
     // =========================================================================
@@ -87,6 +100,20 @@ define([
             // prbk_sl_reports_shell.js → buildPreviewFragment.
             previewChoice: true,
             hideColumns: COST_HEADERS
+        },
+        {
+            id: 'show_recipe_audit',
+            label: 'Show recipe audit',
+            type: 'checkbox',
+            defaultValue: 'F',
+            // previewChoice SIN hideColumns: no oculta ninguna columna (ver
+            // isShowRecipeAudit más arriba). El shell lo pinta como checkbox junto a
+            // los botones de descarga (desmarcado por defecto), pero al no tener
+            // hideColumns lo trata como toggle "refresh" — reenvía el formulario
+            // completo para que el preview se vuelva a renderizar server-side con el
+            // detalle de auditoría. Afecta preview, Excel y PDF (ver
+            // buildHardgoodsPreviewRows, crearExcel, crearPDF y el .ftl).
+            previewChoice: true
         }
     ]);
 
@@ -150,17 +177,18 @@ define([
         log.audit('HARDGOODS.bomRows', `count=${bomRows.length}`);
 
         const showItemCost = isShowItemCost(filterValues);
+        const showRecipeAudit = isShowRecipeAudit(filterValues);
 
         const baseName = `HG_BuyingReport_${String(preebookData.name || prebookId).replace(/\s+/g, '_')}_${nowStamp()}`;
 
         if (format === 'PDF') {
-            const reportPdf = crearPDF(getPdfHeaders(showItemCost), bomRows, `${baseName}.pdf`, prebookId, preebookData, showItemCost);
+            const reportPdf = crearPDF(getPdfHeaders(showItemCost), bomRows, `${baseName}.pdf`, prebookId, preebookData, showItemCost, showRecipeAudit);
             return { fileObj: reportPdf, contentType: 'PDF', filename: `${baseName}.pdf` };
         }
 
         // Excel siempre recibe el set completo de headers: la columna se oculta con
         // ss:Hidden en crearExcel (así no se reindexan los <Column ss:Index="...">).
-        const reportExcel = crearExcel(ALL_HEADERS, bomRows, `${baseName}.xlsx`, prebookId, preebookData, showItemCost);
+        const reportExcel = crearExcel(ALL_HEADERS, bomRows, `${baseName}.xlsx`, prebookId, preebookData, showItemCost, showRecipeAudit);
         return { fileObj: reportExcel, contentType: 'application/vnd.ms-excel', filename: `${baseName}.xls` };
     };
 
@@ -197,9 +225,13 @@ define([
             preebookData.custrecord_sgp_pb_currency_end_date
         );
 
+        const showRecipeAudit = isShowRecipeAudit(filterValues);
+
         // El preview siempre manda el set completo de headers; el checkbox
         // "Show item cost" oculta/muestra FOB COST/LANDED COST client-side
         // (ver prbk_sl_reports_shell.js → buildPreviewFragment / hideColumns).
+        // "Show recipe audit" no oculta columnas: solo revela, vía
+        // buildHardgoodsPreviewRows, el subTotalUnits de cada receta adicional.
         return {
             title: 'Hardgoods Buying Report',
             prebookName: preebookData.name || prebookId,
@@ -209,7 +241,7 @@ define([
                 `Current: ${preebookData.custrecord_sgp_pb_current_start_date} - ${preebookData.custrecord_sgp_pb_currency_end_date}`
             ],
             headers: ALL_HEADERS,
-            rows: buildHardgoodsPreviewRows(bomRows),
+            rows: buildHardgoodsPreviewRows(bomRows, showRecipeAudit),
             rowCount: bomRows.length
         };
     };
@@ -220,8 +252,12 @@ define([
      * visibles (cells + visibleSubRows); de la 6ta en adelante van en `subRows`,
      * que el shell colapsa detrás de un toggle. Mantener espejado con crearExcel
      * ante cualquier cambio de orden de columnas.
+     *
+     * @param {boolean} showRecipeAudit - checkbox "Show recipe audit": si es true,
+     *   la columna TOTAL UNITS de la sub-fila de cada receta adicional muestra su
+     *   propio subTotalUnits (en vez de quedar en blanco).
      */
-    const buildHardgoodsPreviewRows = (rows) => {
+    const buildHardgoodsPreviewRows = (rows, showRecipeAudit) => {
         return (rows || []).map((row) => {
             const recipes = row.recipes || [];
             const first = recipes.length > 0 ? recipes[0] : null;
@@ -242,8 +278,8 @@ define([
                     String(row.landed_cost || 0),
                     String(row.loc_1_oh || 0),
                     String(row.loc_2_oh || 0),
-                    fmtNumber(row.po_received),            // bajo "PO QTY" (réplica invertida, igual que crearExcel)
                     fmtNumber(row.po_qty),                  // bajo "PO RECEIVED" (réplica invertida, igual que crearExcel)
+                    fmtNumber(row.po_received),            // bajo "PO QTY" (réplica invertida, igual que crearExcel)
                     ''                                      // PREP PRODUCTION
                 );
             } else {
@@ -256,7 +292,12 @@ define([
                     recipe.recipe_code + ((recipe.recipedescription || '').trim() ? ' - ' + recipe.recipedescription : ''),
                     safeStr(recipe.customer_code),
                     safeStr(recipe.customer_name),
-                    /**fmtNumber(recipe.subTotalUnits) */'', '', '', '', '', '', '', ''
+                    // TOTAL UNITS de la sub-fila: solo con "Show recipe audit" activo
+                    // (checkbox desmarcado por defecto); si no, queda en blanco.
+                    // Los 8 restantes ("+ -", FOB COST, LANDED COST, LOC1/LOC2 OH UNITS,
+                    // PO QTY, PO RCVD, PREP PROD.) no aplican a nivel receta individual.
+                    (showRecipeAudit && recipe.subTotalUnits != null) ? fmtNumber(recipe.subTotalUnits) : '',
+                    '', '', '', '', '', '', '', ''
                 ],
                 // Solo display (toggle "See all sub total units"): total units de esta receta.
                 subTotalUnits: recipe.subTotalUnits != null ? fmtNumber(recipe.subTotalUnits) : ''
@@ -286,7 +327,7 @@ define([
     // Límite real de file.create en NetSuite es 10 MB; dejamos margen.
     const MAX_XLS_BYTES = 9.8 * 1024 * 1024;
 
-    const crearExcel = (headers, rows, fileName, prebookId, preebookData, showItemCost) => {
+    const crearExcel = (headers, rows, fileName, prebookId, preebookData, showItemCost, showRecipeAudit) => {
         try {
             const showCost = showItemCost !== false;
             const costHidden = showCost ? '' : ' ss:Hidden="1"';
@@ -409,7 +450,14 @@ define([
                         xmlString += strCell(recipe.recipe_code + ((recipe.recipedescription || '').trim() ? " - " : "") + recipe.recipedescription);
                         xmlString += strCell(recipe.customer_code);
                         xmlString += strCell(recipe.customer_name);
-                        xmlString += EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY;
+                        // TOTAL UNITS de esta receta: solo con "Show recipe audit" activo
+                        // (checkbox desmarcado por defecto); si no, celda vacía (igual que antes).
+                        xmlString += (showRecipeAudit && recipe.subTotalUnits != null)
+                            ? strCell(fmtNumber(recipe.subTotalUnits))
+                            : EMPTY;
+                        // "+ -", FOB COST, LANDED COST, LOC1/LOC2 OH UNITS, PO QTY, PO RCVD,
+                        // PREP PROD. no aplican a nivel receta individual.
+                        xmlString += EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY;
                         xmlString += '</Row>';
                     });
                 } else {
@@ -479,7 +527,7 @@ define([
     };
 
     /** Genera el PDF a partir de la plantilla FTL del File Cabinet. */
-    const crearPDF = (headers, rows, fileName, prebookId, preebookData, showItemCost) => {
+    const crearPDF = (headers, rows, fileName, prebookId, preebookData, showItemCost, showRecipeAudit) => {
         try {
             const templateFileId = findTemplateFileId(HG_TEMPLATE_FILENAME);
             if (!templateFileId) {
@@ -501,8 +549,19 @@ define([
             // Datos del reporte → ${data.report[...]} / ${data.metadata.*}
             // Máximo 5 recetas por fila (igual que crearExcel); num_recipes/totalUnits
             // no se tocan, siguen reflejando el total real.
+            // subTotalUnitsDisplay: subTotalUnits pre-formateado como STRING (igual que
+            // crearExcel) para que el .ftl lo imprima con ?xml, NO con ?number?string.number.
+            // El resto de los campos de receta (customer_code, customer_name, recipe_code)
+            // ya son strings y se imprimen bien anidados en `recipes`; subTotalUnits era
+            // el único NÚMERO anidado dentro de un array, y NetSuite's render.DataSource.JSON
+            // no lo expone como TemplateNumberModel igual que a los números de nivel
+            // superior (row.totalUnits, etc.) — ?number sobre él tira "An unexpected
+            // SuiteScript error" en renderAsPdf() (solo reproducible con "Show recipe
+            // audit" activo). Evitamos el problema formateando en JS, no en el template.
             const reportForPdf = rows.map((row) => Object.assign({}, row, {
-                recipes: (row.recipes || []).slice(0, 5)
+                recipes: (row.recipes || []).slice(0, 5).map((r) => Object.assign({}, r, {
+                    subTotalUnitsDisplay: r.subTotalUnits != null ? fmtNumber(r.subTotalUnits) : ''
+                }))
             }));
             renderer.addCustomDataSource({
                 format: render.DataSource.JSON,
@@ -526,7 +585,12 @@ define([
                         // venía false, dejando de renderizar TODAS las filas del <tbody>
                         // (el <thead> ya se había pintado antes del loop). Comparando
                         // contra el string 'T' se evita esa ambigüedad de tipo.
-                        showItemCost: (showItemCost !== false) ? 'T' : 'F'
+                        showItemCost: (showItemCost !== false) ? 'T' : 'F',
+                        // Mismo criterio 'T'/'F' que showItemCost, por la misma razón.
+                        // Checkbox "Show recipe audit" (desmarcado por defecto): revela,
+                        // en la sub-fila de cada receta adicional, su propio subTotalUnits
+                        // en la columna TOTAL UNITS.
+                        showRecipeAudit: (showRecipeAudit === true) ? 'T' : 'F'
                     }
                 })
             });

@@ -10,7 +10,8 @@
       data.report   -> Array de filas (bomRows), cada una con su arreglo anidado .recipes
       data.headers  -> Array de encabezados (ya filtrado según showItemCost)
       data.metadata -> { prebookId, prebookName, historicalStart, historicalEnd,
-                         currentStart, currentEnd, generatedAt, totalRows, showItemCost }
+                         currentStart, currentEnd, generatedAt, totalRows, showItemCost,
+                         showRecipeAudit }
 
     Diseño espejo del Excel (crearExcel):
       - Bloque de título de 3 filas
@@ -19,6 +20,9 @@
       - Items sin recetas: solo las 5 primeras columnas con datos, resto en blanco
       - FOB COST / LANDED COST se omiten por completo (colgroup + celdas) cuando
         data.metadata.showItemCost es false (checkbox "Show item cost" del preview).
+      - TOTAL UNITS de la sub-fila de cada receta adicional solo se imprime
+        (recipe.subTotalUnits) cuando data.metadata.showRecipeAudit es 'T'
+        (checkbox "Show recipe audit" del preview, desmarcado por defecto).
     ============================================================================
 -->
 <#setting number_format="computer">
@@ -65,6 +69,8 @@
             line-height: 7pt;
             white-space: normal;
         }
+        <#-- "+/-" header: solo visual, más grande que el resto de los th. -->
+        table.report th.plus-minus { font-size: 8pt; }
         table.report td {
             border: 0.5px solid #000000;
             padding: 1.5px 2px;
@@ -118,6 +124,8 @@
          había renderizado antes del loop) — mismo tipo de bug que ?string/?is_number
          ya resuelto para los números. Ver crearPDF (prbk_lib_r1_hardgoods_buying_report.js). -->
     <#assign showItemCost = (data.metadata.showItemCost!'T') == 'T'>
+    <#-- Mismo criterio 'T'/'F' que showItemCost, por la misma razón (ver crearPDF). -->
+    <#assign showRecipeAudit = (data.metadata.showRecipeAudit!'F') == 'T'>
 
     <#-- ===================== BLOQUE DE TÍTULO ===================== -->
     <table class="title-block">
@@ -164,11 +172,18 @@
             <tr>
                 <#-- CODE DESCRIPTION / CUSTOMER NAME / "+ -" quedan en una sola línea
                      (sin <br/> por espacio); el resto de headers multi-palabra sigue
-                     partiéndose para no ensanchar esas columnas. -->
+                     partiéndose para no ensanchar esas columnas.
+                     "+ -" y "PO QTY" se muestran distinto solo en el PDF (visual):
+                     "+ -" -> "+/-" en fuente más grande (th.plus-minus);
+                     "PO QTY" -> "PO QTY INB". El dato/columna subyacente no cambia. -->
                 <#list (data.headers)![] as h>
                     <#assign hStr = h!"">
-                    <#if hStr == "CODE DESCRIPTION" || hStr == "CUSTOMER NAME" || hStr == "+ -">
+                    <#if hStr == "+ -">
+                        <th align="center" valign="middle" class="plus-minus">+/-</th>
+                    <#elseif hStr == "CODE DESCRIPTION" || hStr == "CUSTOMER NAME">
                         <th align="center" valign="middle">${hStr?xml}</th>
+                    <#elseif hStr == "PO QTY">
+                        <th align="center" valign="middle">${"PO QTY INB"?replace(" ", "<br/>")}</th>
                     <#else>
                         <th align="center" valign="middle">${hStr?xml?replace(" ", "<br/>")}</th>
                     </#if>
@@ -201,8 +216,8 @@
                             </#if>
                             <td align="right">${fmtNum(row.loc_1_oh)?number?string.number}</td>
                             <td align="right">${fmtNum(row.loc_2_oh)?number?string.number}</td>
-                            <td align="right">${fmtNum(row.po_received)?number?string.number}</td>
                             <td align="right">${fmtNum(row.po_qty)?number?string.number}</td>
+                            <td align="right">${fmtNum(row.po_received)?number?string.number}</td>
                             <td align="right">&nbsp;</td><#-- PREP PROD. (TBD) -->
                         <#else>
                             <#-- Item sin recetas: columnas restantes en blanco -->
@@ -225,7 +240,20 @@
                                     <td class="trunc">${codeDescN?truncate(CODEDESC_LIMIT, "")?xml}</td>
                                     <td align="right">${(recipe.customer_code!"")?xml}</td>
                                     <td class="trunc">${(recipe.customer_name!"")?truncate(CUSTNAME_LIMIT, "")?xml}</td>
-                                    <td>&nbsp;</td><td>&nbsp;</td>
+                                    <#-- TOTAL UNITS de esta receta: solo con "Show recipe audit" activo
+                                         (checkbox desmarcado por defecto); si no, celda vacía (igual que antes).
+                                         Se imprime como STRING (subTotalUnitsDisplay, ya formateado en JS con
+                                         fmtNumber en crearPDF), NO con ?number?string.number: ese número vive
+                                         anidado dentro de `recipes` y, a diferencia de los números de nivel
+                                         superior (row.totalUnits, etc.), el data source JSON de NetSuite no lo
+                                         expone igual — ?number ahí tiraba "An unexpected SuiteScript error"
+                                         en renderAsPdf(). Mismo patrón que customer_code/customer_name (?xml). -->
+                                    <#if showRecipeAudit>
+                                    <td align="right">${(recipe.subTotalUnitsDisplay!"")?xml}</td>
+                                    <#else>
+                                    <td>&nbsp;</td>
+                                    </#if>
+                                    <td>&nbsp;</td><#-- "+ -": no aplica a nivel receta -->
                                     <#if showItemCost><td>&nbsp;</td><td>&nbsp;</td></#if>
                                     <td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td>
                                     <td>&nbsp;</td><td>&nbsp;</td>

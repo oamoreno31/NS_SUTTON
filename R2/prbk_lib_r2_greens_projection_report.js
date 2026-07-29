@@ -414,7 +414,9 @@ define([
                         br.id  AS revision_id,
                         CASE WHEN UPPER(comp.itemsource) IN ('WORK_ORDER', 'PHANTOM')
                              THEN subcomp.item ELSE comp.item END AS item_id,
-                        (NVL(comp.bomquantity, 1) * NVL(subcomp.bomquantity, 1)) AS bom_quantity
+                        -- NVL(comp.bomquantity, 0): alineado con R1 y pa_sl_bom_explosion_ui.js
+                        -- (antes usaba default 1, inconsistente con el resto).
+                        (NVL(comp.bomquantity, 0) * NVL(subcomp.bomquantity, 1)) AS bom_quantity
                     FROM bom b
                     INNER JOIN itemAssemblyItemBom iaib ON iaib.billofmaterials = b.id
                     INNER JOIN bomRevisionBomMap map ON map.billofmaterials = b.id
@@ -459,6 +461,51 @@ define([
                 log.audit('GREENS.loadBomComponents',
                     'Fase 2: SIN resultados — ningún green aparece (directo o vía phantom/WO) como componente de ninguna receta vigente. STEMS/BUNCHES/CASES NEEDED quedarán en 0 para todos.');
             }
+
+            // ── 4b. BOM meta (receta/cliente) — igual que fase 4 de R1 ─────
+            //      Necesario para armar row.components (array de recetas/BOMs que
+            //      aportan cantidad a cada green, con código y cliente para display).
+            phase = '4b-bom meta (recipe/customer)';
+            const bomMeta = {};   // bomId → { recipe_code, recipe_description, customer_code, customer_name }
+            const bomIdsForMeta = Object.keys(bomIdSet);
+            chunkIds(bomIdsForMeta, 1000).forEach((inList) => {
+                runSuiteQLAll(`
+                    SELECT
+                        b.id                                AS bom_id,
+                        b.name                              AS recipe_code,
+                        prm.custrecord_sgp_prm_description   AS recipe_description,
+                        cust.entityid                       AS customer_code,
+                        CASE WHEN cust.custentity_sgp_consolidateprebook = 'T'
+                              AND parentcust.altname IS NOT NULL
+                             THEN parentcust.altname
+                             ELSE cust.altname
+                        END                                  AS customer_name
+                    FROM Bom b
+                    LEFT JOIN Customer cust ON cust.id = b.custrecord_sgp_bom_customer AND cust.isinactive = 'F'
+                    LEFT JOIN Customer parentcust ON parentcust.id = cust.parent
+                    LEFT JOIN customrecord_sgp_recipe_product_mgt prm
+                        ON TRIM(CASE WHEN INSTR(prm.name, '(') > 0
+                                     THEN SUBSTR(prm.name, 1, INSTR(prm.name, '(') - 1)
+                                     ELSE prm.name END)
+                         = TRIM(CASE WHEN INSTR(b.name, '(') > 0
+                                     THEN SUBSTR(b.name, 1, INSTR(b.name, '(') - 1)
+                                     ELSE b.name END)
+                    WHERE b.id IN (${inList})
+                      AND b.isinactive = 'F'
+                    ORDER BY
+                        b.id ASC                                 -- OBLIGATORIO para usar FETCH FIRST
+                    FETCH FIRST 4000 ROWS ONLY
+                `).forEach((r) => {
+                    bomMeta[String(r.bom_id)] = {
+                        recipe_code: r.recipe_code || '',
+                        recipe_description: r.recipe_description || '',
+                        customer_code: r.customer_code || '',
+                        customer_name: r.customer_name || ''
+                    };
+                });
+            });
+            log.audit('GREENS.loadBomComponents',
+                `Fase 4b: BOM meta obtenida para ${Object.keys(bomMeta).length} de ${bomIdsForMeta.length} BOMs.`);
 
             phase = '6-po qty y recibido (LOC1)';
             const poByItem = {};
@@ -570,6 +617,23 @@ define([
                 const stemsNeeded = Object.keys(bestRevByBom)
                     .reduce((sum, bomId) => sum + (bestRevByBom[bomId].bomquantity || 0), 0);
 
+                // Arreglo con TODOS los componentes (BOMs/recetas) que aportan cantidad a
+                // este green y su cantidad individual — stemsNeeded arriba es la SUMA de
+                // estos mismos valores; components conserva el detalle por receta (igual
+                // idea que row.recipes en R1), para poder auditar/mostrar de dónde sale
+                // el total (p.ej. una futura columna "Show recipe audit" para R2).
+                const components = Object.keys(bestRevByBom).map((bomId) => {
+                    const meta = bomMeta[bomId] || {};
+                    return {
+                        bomId: bomId,
+                        recipeCode: stripRecipeCodeSuffix(meta.recipe_code),
+                        recipeDescription: meta.recipe_description || '',
+                        customerCode: meta.customer_code || '',
+                        customerName: meta.customer_name || '',
+                        quantity: bestRevByBom[bomId].bomquantity || 0
+                    };
+                }).sort((a, b) => b.quantity - a.quantity);
+
                 const bunchesNeeded = actualStems > 0 ? Math.ceil(stemsNeeded / actualStems) : 0;
                 const casesNeededCount = packing > 0 ? Math.ceil(bunchesNeeded / packing) : 0;
                 const casesNeeded = packing > 0 ? `${casesNeededCount}X${packing}` : String(casesNeededCount);
@@ -605,6 +669,8 @@ define([
                     description: r.description || '',
                     pkstm: pkstm,
                     stemsNeeded: stemsNeeded,
+                    // Detalle por receta/BOM que compone stemsNeeded (ver comentario arriba).
+                    components: components,
                     bunchesNeeded: bunchesNeeded,
                     casesNeeded: casesNeeded,
                     qtyOnHand: qtyOnHand,
@@ -661,6 +727,14 @@ define([
     };
 
     const safeStr = (v) => (isEmptyValue(v) ? '' : String(v));
+
+    /** Quita el sufijo "(xx)" (y el espacio previo) de un recipe_code (b.name) para
+     *  mostrarlo limpio — igual que en R1 (prbk_lib_r1_hardgoods_buying_report.js). */
+    const stripRecipeCodeSuffix = (code) => {
+        const s = String(code || '');
+        const idx = s.indexOf('(');
+        return (idx > -1 ? s.substring(0, idx) : s).trim();
+    };
 
     const compareSubcat = (a, b) => {
         const sa = safeStr(a);
