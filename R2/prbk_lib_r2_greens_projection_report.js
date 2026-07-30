@@ -386,10 +386,16 @@ define([
             log.audit('GREENS.loadBomComponents', `Ítems GREENS: ${results_gnl.length}`);
             const greenItemIds = results_gnl.map((r) => String(r.item));
 
-            phase = '2-explosion 2 niveles + fechas + inactivos';
-            const revisionDataByItem = {};
-            const bomIdByRevision = {};
-            const bomIdSet = {};
+            // ── 2. Explosión hacia ABAJO de la BOM PROPIA de cada green ────
+            //      Un GREEN es un ítem terminado (assembly) con su propia BOM —
+            //      ya no se busca dónde el green aparece como componente de otra
+            //      receta (where-used). Se parte de itemAssemblyItemBom.assembly =
+            //      green y se baja: componente directo, y si ese componente es
+            //      Phantom/Work Order, un nivel más (subcomponente) — mismo patrón
+            //      de 2 niveles que R1 y pa_sl_bom_explosion_ui.js, pero en la
+            //      dirección correcta (forward, no where-used).
+            phase = '2-explosion (BOM propia del green) 2 niveles + fechas + inactivos';
+            const explosionByGreen = {};   // greenId → revId → { bomId, comps: { compItemId: {code, description, quantity} } }
             const currentStartIso = toIsoDateStr(parseAccountDate(currentStart));
             const currentEndIso = toIsoDateStr(parseAccountDate(currentEnd));
             const dateConds = [];
@@ -410,18 +416,23 @@ define([
             chunkIds(greenItemIds, 1000).forEach((inList) => {
                 runSuiteQLAll(`
                     SELECT DISTINCT
-                        b.id   AS bom_id,
-                        br.id  AS revision_id,
+                        iaib.assembly AS green_item_id,
+                        b.id          AS bom_id,
+                        br.id         AS revision_id,
                         CASE WHEN UPPER(comp.itemsource) IN ('WORK_ORDER', 'PHANTOM')
-                             THEN subcomp.item ELSE comp.item END AS item_id,
-                        -- NVL(comp.bomquantity, 0): alineado con R1 y pa_sl_bom_explosion_ui.js
-                        -- (antes usaba default 1, inconsistente con el resto).
+                             THEN subcomp.item ELSE comp.item END AS component_item_id,
+                        CASE WHEN UPPER(comp.itemsource) IN ('WORK_ORDER', 'PHANTOM')
+                             THEN subitm.itemid ELSE compitm.itemid END AS component_code,
+                        CASE WHEN UPPER(comp.itemsource) IN ('WORK_ORDER', 'PHANTOM')
+                             THEN NVL(subitm.purchasedescription, subitm.displayname)
+                             ELSE NVL(compitm.purchasedescription, compitm.displayname) END AS component_description,
                         (NVL(comp.bomquantity, 0) * NVL(subcomp.bomquantity, 1)) AS bom_quantity
-                    FROM bom b
-                    INNER JOIN itemAssemblyItemBom iaib ON iaib.billofmaterials = b.id
+                    FROM itemAssemblyItemBom iaib
+                    INNER JOIN bom b ON b.id = iaib.billofmaterials
                     INNER JOIN bomRevisionBomMap map ON map.billofmaterials = b.id
                     INNER JOIN bomRevision br ON br.id = map.bomrevision AND NVL(br.isinactive, 'F') = 'F'
                     INNER JOIN bomRevisionComponentMember comp ON comp.bomrevision = br.id
+                    LEFT JOIN item compitm ON compitm.id = comp.item
                     LEFT JOIN itemAssemblyItemBom sub_iaib
                         ON sub_iaib.assembly = comp.item
                         AND UPPER(comp.itemsource) IN ('WORK_ORDER', 'PHANTOM')
@@ -429,7 +440,9 @@ define([
                     LEFT JOIN bomRevisionBomMap sub_map ON sub_map.billofmaterials = sub_bom.id
                     LEFT JOIN bomRevision sub_bomRev ON sub_bomRev.id = sub_map.bomrevision AND NVL(sub_bomRev.isinactive, 'F') = 'F'
                     LEFT JOIN bomRevisionComponentMember subcomp ON subcomp.bomrevision = sub_bomRev.id
-                    WHERE NVL(b.isinactive, 'F') = 'F'
+                    LEFT JOIN item subitm ON subitm.id = subcomp.item
+                    WHERE iaib.assembly IN (${inList})
+                      AND NVL(b.isinactive, 'F') = 'F'
                       AND (b.name IS NULL OR b.name NOT LIKE '%*%')
                       AND (br.name IS NULL OR br.name NOT LIKE '%*%')
                       AND (
@@ -437,75 +450,32 @@ define([
                             OR
                             (UPPER(comp.itemsource) NOT IN ('WORK_ORDER', 'PHANTOM'))
                           )
-                      AND (
-                            (UPPER(comp.itemsource) IN ('WORK_ORDER', 'PHANTOM') AND subcomp.item IN (${inList}))
-                            OR
-                            (UPPER(comp.itemsource) NOT IN ('WORK_ORDER', 'PHANTOM') AND comp.item IN (${inList}))
-                          )
                       ${dateWhereSql}
-                    ORDER BY b.id ASC
+                    ORDER BY iaib.assembly ASC
                 `, dateParams).forEach((r) => {
                     totalComponentRows++;
-                    const itemId = String(r.item_id);
+                    const greenId = String(r.green_item_id);
                     const revId = String(r.revision_id);
-                    if (!revisionDataByItem[itemId]) revisionDataByItem[itemId] = {};
-                    revisionDataByItem[itemId][revId] =
-                        (revisionDataByItem[itemId][revId] || 0) + (Number(r.bom_quantity) || 0);
-                    bomIdByRevision[revId] = String(r.bom_id);
-                    bomIdSet[String(r.bom_id)] = true;
+                    const compId = String(r.component_item_id);
+                    if (!explosionByGreen[greenId]) explosionByGreen[greenId] = {};
+                    if (!explosionByGreen[greenId][revId]) {
+                        explosionByGreen[greenId][revId] = { bomId: String(r.bom_id), comps: {} };
+                    }
+                    const comps = explosionByGreen[greenId][revId].comps;
+                    if (!comps[compId]) {
+                        comps[compId] = { code: r.component_code || '', description: r.component_description || '', quantity: 0 };
+                    }
+                    // Suma (no sobrescribe): el mismo subcomponente puede llegar por más de
+                    // una línea/ruta dentro de la misma revisión (directo + phantom).
+                    comps[compId].quantity += (Number(r.bom_quantity) || 0);
                 });
             });
             log.audit('GREENS.loadBomComponents',
-                `Fase 2: explosión filas=${totalComponentRows}, greens con >=1 receta=${Object.keys(revisionDataByItem).length} de ${greenItemIds.length}, BOMs distintos=${Object.keys(bomIdSet).length}`);
-            if (!Object.keys(revisionDataByItem).length) {
+                `Fase 2: explosión filas=${totalComponentRows}, greens con BOM propia vigente=${Object.keys(explosionByGreen).length} de ${greenItemIds.length}`);
+            if (!Object.keys(explosionByGreen).length) {
                 log.audit('GREENS.loadBomComponents',
-                    'Fase 2: SIN resultados — ningún green aparece (directo o vía phantom/WO) como componente de ninguna receta vigente. STEMS/BUNCHES/CASES NEEDED quedarán en 0 para todos.');
+                    'Fase 2: SIN resultados — ningún green tiene su propia BOM vigente (activa, sin "*", dentro del rango CURRENT). STEMS/BUNCHES/CASES NEEDED quedarán en 0 para todos.');
             }
-
-            // ── 4b. BOM meta (receta/cliente) — igual que fase 4 de R1 ─────
-            //      Necesario para armar row.components (array de recetas/BOMs que
-            //      aportan cantidad a cada green, con código y cliente para display).
-            phase = '4b-bom meta (recipe/customer)';
-            const bomMeta = {};   // bomId → { recipe_code, recipe_description, customer_code, customer_name }
-            const bomIdsForMeta = Object.keys(bomIdSet);
-            chunkIds(bomIdsForMeta, 1000).forEach((inList) => {
-                runSuiteQLAll(`
-                    SELECT
-                        b.id                                AS bom_id,
-                        b.name                              AS recipe_code,
-                        prm.custrecord_sgp_prm_description   AS recipe_description,
-                        cust.entityid                       AS customer_code,
-                        CASE WHEN cust.custentity_sgp_consolidateprebook = 'T'
-                              AND parentcust.altname IS NOT NULL
-                             THEN parentcust.altname
-                             ELSE cust.altname
-                        END                                  AS customer_name
-                    FROM Bom b
-                    LEFT JOIN Customer cust ON cust.id = b.custrecord_sgp_bom_customer AND cust.isinactive = 'F'
-                    LEFT JOIN Customer parentcust ON parentcust.id = cust.parent
-                    LEFT JOIN customrecord_sgp_recipe_product_mgt prm
-                        ON TRIM(CASE WHEN INSTR(prm.name, '(') > 0
-                                     THEN SUBSTR(prm.name, 1, INSTR(prm.name, '(') - 1)
-                                     ELSE prm.name END)
-                         = TRIM(CASE WHEN INSTR(b.name, '(') > 0
-                                     THEN SUBSTR(b.name, 1, INSTR(b.name, '(') - 1)
-                                     ELSE b.name END)
-                    WHERE b.id IN (${inList})
-                      AND b.isinactive = 'F'
-                    ORDER BY
-                        b.id ASC                                 -- OBLIGATORIO para usar FETCH FIRST
-                    FETCH FIRST 4000 ROWS ONLY
-                `).forEach((r) => {
-                    bomMeta[String(r.bom_id)] = {
-                        recipe_code: r.recipe_code || '',
-                        recipe_description: r.recipe_description || '',
-                        customer_code: r.customer_code || '',
-                        customer_name: r.customer_name || ''
-                    };
-                });
-            });
-            log.audit('GREENS.loadBomComponents',
-                `Fase 4b: BOM meta obtenida para ${Object.keys(bomMeta).length} de ${bomIdsForMeta.length} BOMs.`);
 
             phase = '6-po qty y recibido (LOC1)';
             const poByItem = {};
@@ -595,44 +565,51 @@ define([
                 `Fase 8: Assembly Build filas=${totalPrepRows}, greens con producción=${Object.keys(prepByItem).length} de ${greenItemIds.length} (custbody_sgp_report_id=${prebookId})`);
 
             phase = '9-armado filas';
-            let itemsNoRevData = 0, skipsNoBomId = 0;
+            let itemsNoRevData = 0;
             let itemsWithStems = 0, itemsWithOnHand = 0, itemsWithPoReceived = 0, itemsWithPrep = 0;
             results_gnl.forEach((r) => {
                 const itemId = String(r.item);
                 const packing = Number(r.packing) || 0;
                 const actualStems = Number(r.actual_stems) || 0;
 
-                const revData = revisionDataByItem[itemId] || {};
-                if (!Object.keys(revData).length) itemsNoRevData++;
+                const revMap = explosionByGreen[itemId] || {};
+                const revIds = Object.keys(revMap);
+                if (!revIds.length) itemsNoRevData++;
 
+                // Dedup: 1 mejor revisión (la de ID más alto) por cada BOM propia del
+                // green que calificó — normalmente un green tiene una sola BOM, pero
+                // se soporta más de una por seguridad (igual patrón que R1).
                 const bestRevByBom = {};
-                Object.keys(revData).forEach((revId) => {
-                    const bomId = bomIdByRevision[revId];
-                    if (!bomId) { skipsNoBomId++; return; }
+                revIds.forEach((revId) => {
+                    const bomId = revMap[revId].bomId;
                     const current = bestRevByBom[bomId];
                     if (!current || Number(revId) > Number(current.revId)) {
-                        bestRevByBom[bomId] = { revId: revId, bomquantity: revData[revId] };
+                        bestRevByBom[bomId] = { revId: revId, comps: revMap[revId].comps };
                     }
                 });
-                const stemsNeeded = Object.keys(bestRevByBom)
-                    .reduce((sum, bomId) => sum + (bestRevByBom[bomId].bomquantity || 0), 0);
 
-                // Arreglo con TODOS los componentes (BOMs/recetas) que aportan cantidad a
-                // este green y su cantidad individual — stemsNeeded arriba es la SUMA de
-                // estos mismos valores; components conserva el detalle por receta (igual
-                // idea que row.recipes en R1), para poder auditar/mostrar de dónde sale
-                // el total (p.ej. una futura columna "Show recipe audit" para R2).
-                const components = Object.keys(bestRevByBom).map((bomId) => {
-                    const meta = bomMeta[bomId] || {};
-                    return {
-                        bomId: bomId,
-                        recipeCode: stripRecipeCodeSuffix(meta.recipe_code),
-                        recipeDescription: meta.recipe_description || '',
-                        customerCode: meta.customer_code || '',
-                        customerName: meta.customer_name || '',
-                        quantity: bestRevByBom[bomId].bomquantity || 0
-                    };
-                }).sort((a, b) => b.quantity - a.quantity);
+                // Subcomponentes REALES (materiales) que arman este green, fusionados
+                // entre todas las BOM "mejores" (normalmente 1 sola) — ya no son
+                // recetas/clientes (eso era para la dirección where-used anterior).
+                const compTotals = {};
+                Object.keys(bestRevByBom).forEach((bomId) => {
+                    const comps = bestRevByBom[bomId].comps;
+                    Object.keys(comps).forEach((compId) => {
+                        if (!compTotals[compId]) {
+                            compTotals[compId] = { code: comps[compId].code, description: comps[compId].description, quantity: 0 };
+                        }
+                        compTotals[compId].quantity += comps[compId].quantity;
+                    });
+                });
+                const components = Object.keys(compTotals).map((compId) => ({
+                    componentItemId: compId,
+                    componentCode: compTotals[compId].code,
+                    componentDescription: compTotals[compId].description,
+                    quantity: compTotals[compId].quantity
+                })).sort((a, b) => b.quantity - a.quantity);
+
+                // STEMS NEEDED = suma de las cantidades de todos los subcomponentes.
+                const stemsNeeded = components.reduce((sum, c) => sum + (c.quantity || 0), 0);
 
                 const bunchesNeeded = actualStems > 0 ? Math.ceil(stemsNeeded / actualStems) : 0;
                 const casesNeededCount = packing > 0 ? Math.ceil(bunchesNeeded / packing) : 0;
@@ -669,7 +646,7 @@ define([
                     description: r.description || '',
                     pkstm: pkstm,
                     stemsNeeded: stemsNeeded,
-                    // Detalle por receta/BOM que compone stemsNeeded (ver comentario arriba).
+                    // Desglose por subcomponente (material real) que compone stemsNeeded.
                     components: components,
                     bunchesNeeded: bunchesNeeded,
                     casesNeeded: casesNeeded,
@@ -693,8 +670,7 @@ define([
             });
 
             log.audit('GREENS.loadBomComponents',
-                `Fase 9 resumen: ${results_gnl.length} greens · sin recetas vigentes=${itemsNoRevData} · ` +
-                `saltos por bomId no resuelto=${skipsNoBomId}`);
+                `Fase 9 resumen: ${results_gnl.length} greens · sin BOM propia vigente=${itemsNoRevData}`);
             log.audit('GREENS.loadBomComponents',
                 `Fase 9 columnas >0: STEMS NEEDED=${itemsWithStems} · QUANTITY ONHAND=${itemsWithOnHand} · ` +
                 `PO RECVD=${itemsWithPoReceived} · UNIT PREP COMP=${itemsWithPrep} (de ${results_gnl.length} greens)`);
@@ -727,14 +703,6 @@ define([
     };
 
     const safeStr = (v) => (isEmptyValue(v) ? '' : String(v));
-
-    /** Quita el sufijo "(xx)" (y el espacio previo) de un recipe_code (b.name) para
-     *  mostrarlo limpio — igual que en R1 (prbk_lib_r1_hardgoods_buying_report.js). */
-    const stripRecipeCodeSuffix = (code) => {
-        const s = String(code || '');
-        const idx = s.indexOf('(');
-        return (idx > -1 ? s.substring(0, idx) : s).trim();
-    };
 
     const compareSubcat = (a, b) => {
         const sa = safeStr(a);
