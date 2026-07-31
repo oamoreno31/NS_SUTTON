@@ -71,6 +71,9 @@
 <body size="A4-landscape" footer="nlfooter" footer-height="18px"
       padding="0.4in 0.4in 0.4in 0.4in">
 
+    <#-- 'T'/'F' en vez de boolean: mismo criterio que R1 (ver crearPDF). -->
+    <#assign showAudit = (data.metadata.showAudit!'F') == 'T'>
+
     <table class="title-block">
         <tr>
             <td width="60%" class="report-no">WO720.R&nbsp;&nbsp;&nbsp;# ${(data.metadata.prebookId!"")?xml}&nbsp;&nbsp;&nbsp;ALL RAW MATERIALS PROJECTION REPORT FOR ALL RECIPES</td>
@@ -90,6 +93,10 @@
             <col width="8%"/>
             <col width="17%"/>
             <col width="7%"/>
+            <#if showAudit>
+            <col width="7%"/>  <#-- SOLD BUNCHES -->
+            <col width="7%"/>  <#-- SUBTOTAL -->
+            </#if>
             <col width="8%"/>
             <col width="8%"/>
             <col width="8%"/>
@@ -124,6 +131,10 @@
                         <td class="txt">${(row.productCode!"")?xml}</td>
                         <td class="txt">${(row.description!"")?xml}</td>
                         <td class="ctr">${(row.pkstm!"")?xml}</td>
+                        <#if showAudit>
+                        <td class="num">${(row.soldBunches)!0}</td>
+                        <td class="num">${(row.subtotal)!0}</td>
+                        </#if>
                         <td class="num">${(row.stemsNeeded)!0}</td>
                         <td class="num">${(row.bunchesNeeded)!0}</td>
                         <td class="num">${(row.casesNeeded!"")?xml}</td>

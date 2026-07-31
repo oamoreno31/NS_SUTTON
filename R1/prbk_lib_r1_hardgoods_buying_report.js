@@ -28,26 +28,88 @@ define([
     // Columnas que se ocultan cuando el checkbox "Show item cost" está desmarcado.
     const COST_HEADERS = ['FOB COST', 'LANDED COST'];
 
+    // Header de la columna nueva de auditoría (solo aparece con "Show recipe audit"
+    // activo — ver getAllHeaders/isShowRecipeAudit). Se inserta antes de TOTAL UNITS.
+    const AUDIT_SUBTOTAL_HEADER = 'SUBTOTAL UNITS';
+
     /** true si se deben mostrar FOB COST/LANDED COST (checkbox marcado por defecto). */
     const isShowItemCost = (filterValues) =>
         String((filterValues || {}).show_item_cost || 'T').toUpperCase() !== 'F';
 
-    /** Encabezados para el PDF: quita FOB COST/LANDED COST si showItemCost es false. */
-    const getPdfHeaders = (showItemCost) =>
-        showItemCost ? ALL_HEADERS : ALL_HEADERS.filter((h) => COST_HEADERS.indexOf(h) === -1);
+    /** Set de encabezados a usar: igual a ALL_HEADERS, salvo que con "Show recipe
+     *  audit" activo se inserta AUDIT_SUBTOTAL_HEADER justo antes de TOTAL UNITS.
+     *  Sin el checkbox, el reporte usa exactamente el mismo header set de siempre
+     *  (cero cambios de layout). */
+    const getAllHeaders = (showRecipeAudit) => {
+        if (!showRecipeAudit) return ALL_HEADERS;
+        const idx = ALL_HEADERS.indexOf('TOTAL UNITS');
+        const withAudit = ALL_HEADERS.slice();
+        withAudit.splice(idx, 0, AUDIT_SUBTOTAL_HEADER);
+        return withAudit;
+    };
+
+    /** Encabezados para el PDF: parte de getAllHeaders (ya con/sin SUBTOTAL UNITS
+     *  según showRecipeAudit) y además quita FOB COST/LANDED COST si showItemCost
+     *  es false. */
+    const getPdfHeaders = (showItemCost, showRecipeAudit) => {
+        const base = getAllHeaders(showRecipeAudit);
+        return showItemCost ? base : base.filter((h) => COST_HEADERS.indexOf(h) === -1);
+    };
 
     /** true si se debe mostrar el detalle de auditoría por receta (checkbox
-     *  "Show recipe audit", desmarcado por defecto): revela, en la sub-fila de
-     *  cada receta adicional, su propia proyección (recipe.subTotalUnits) en la
-     *  columna TOTAL UNITS — hoy esa celda va en blanco. A diferencia de
-     *  "Show item cost" (que oculta/muestra una columna ENTERA vía hideColumns),
-     *  este checkbox no oculta ninguna columna (la fila principal ya usa esa
-     *  misma columna para el total agregado); solo revela un valor puntual ya
-     *  calculado. Por eso el shell lo trata como un toggle "refresh" (reenvía el
-     *  preview completo) y no como un toggle instantáneo client-side — ver
-     *  prbk_sl_reports_shell.js → pbSetHiddenAndRefresh. */
+     *  "Show recipe audit", desmarcado por defecto). Activo, cambia la fila
+     *  principal de cada item: CODE DESCRIPTION/CUST/CUSTOMER NAME quedan en
+     *  blanco (antes mostraban la 1ra receta) y aparece la columna nueva
+     *  SUBTOTAL UNITS con el desglose "suma * bomQuantity" cuyo resultado es
+     *  TOTAL UNITS (que no cambia de valor). La receta que antes iba en la fila
+     *  principal baja a sub-fila junto con las demás, mostrando su propio
+     *  subTotalUnits en la columna TOTAL UNITS (igual mecanismo que ya existía
+     *  para las sub-filas). Desmarcado, el reporte es idéntico al de siempre.
+     *  Por no ser un simple hide/show de columna (el CONTENIDO de varias celdas
+     *  cambia, no solo su visibilidad), el shell lo trata como un toggle
+     *  "refresh" (reenvía el preview completo) y no como un toggle instantáneo
+     *  client-side — ver prbk_sl_reports_shell.js → pbSetHiddenAndRefresh. */
     const isShowRecipeAudit = (filterValues) =>
         String((filterValues || {}).show_recipe_audit || 'F').toUpperCase() === 'T';
+
+    /** MULTIPLIER compartido por toda la fila (row0 + sus sub-filas): bomQuantity
+     *  de recipes[0] (la de mayor subTotalUnits tras el sort de fase 7), o 1 si no
+     *  hay recetas o bomQuantity no es un número > 0. Un único multiplicador por
+     *  fila (no uno distinto por receta) es lo que garantiza que la suma de los
+     *  valores por-receta de SUBTOTAL UNITS reconstruya exacto el SUM de row0. */
+    const getBomMultiplier = (row) => {
+        const recipes = row.recipes || [];
+        if (!recipes.length) return 1;
+        const raw = Number(recipes[0].bomQuantity);
+        return raw > 0 ? raw : 1;
+    };
+
+    /** Texto "SUM * MULTIPLIER" para la columna SUBTOTAL UNITS de la fila principal
+     *  (row0, solo con "Show recipe audit" activo). SUM se DERIVA de
+     *  TOTAL UNITS / MULTIPLIER —no al revés— para que la multiplicación
+     *  reconstruya EXACTO el mismo TOTAL UNITS que ya se muestra hoy (ese cálculo
+     *  no se toca): SUM * MULTIPLIER === row.totalUnits siempre. */
+    const buildSubtotalUnitsDisplay = (row) => {
+        const recipes = row.recipes || [];
+        if (!recipes.length) return '';
+        const multiplier = getBomMultiplier(row);
+        const total = Number(row.totalUnits) || 0;
+        const base = total / multiplier;
+        return `${fmtNumber(base)} * ${fmtNumber(multiplier)}`;
+    };
+
+    /** Valor de SUBTOTAL UNITS para la sub-fila de UNA receta: su propia
+     *  contribución al SUM de row0 — recipe.subTotalUnits dividido por el MISMO
+     *  multiplicador de row0 (getBomMultiplier), no por el bomQuantity individual
+     *  de esa receta. Así, sumar este valor entre todas las recetas de la fila
+     *  siempre reconstruye exacto el SUM que se ve en row0 (incluso con una sola
+     *  receta: antes esta celda mostraba el subTotalUnits completo —el valor "ya
+     *  multiplicado"— en vez de su aporte a la suma pre-multiplicación). */
+    const buildRecipeSubtotalDisplay = (row, recipe) => {
+        if (recipe.subTotalUnits == null) return '';
+        const multiplier = getBomMultiplier(row);
+        return fmtNumber(Number(recipe.subTotalUnits) / multiplier);
+    };
 
     // =========================================================================
     // 1. METADATA
@@ -182,13 +244,16 @@ define([
         const baseName = `HG_BuyingReport_${String(preebookData.name || prebookId).replace(/\s+/g, '_')}_${nowStamp()}`;
 
         if (format === 'PDF') {
-            const reportPdf = crearPDF(getPdfHeaders(showItemCost), bomRows, `${baseName}.pdf`, prebookId, preebookData, showItemCost, showRecipeAudit);
+            const reportPdf = crearPDF(getPdfHeaders(showItemCost, showRecipeAudit), bomRows, `${baseName}.pdf`, prebookId, preebookData, showItemCost, showRecipeAudit);
             return { fileObj: reportPdf, contentType: 'PDF', filename: `${baseName}.pdf` };
         }
 
-        // Excel siempre recibe el set completo de headers: la columna se oculta con
-        // ss:Hidden en crearExcel (así no se reindexan los <Column ss:Index="...">).
-        const reportExcel = crearExcel(ALL_HEADERS, bomRows, `${baseName}.xlsx`, prebookId, preebookData, showItemCost, showRecipeAudit);
+        // Excel siempre recibe el set completo de headers (con SUBTOTAL UNITS incluido
+        // cuando showRecipeAudit está activo — ver getAllHeaders): FOB/LANDED COST se
+        // ocultan con ss:Hidden en crearExcel (así no se reindexan los demás
+        // <Column ss:Index="...">) pero SUBTOTAL UNITS sí cambia el set de columnas,
+        // porque "Show recipe audit" ya es un toggle "refresh" (no client-side).
+        const reportExcel = crearExcel(getAllHeaders(showRecipeAudit), bomRows, `${baseName}.xlsx`, prebookId, preebookData, showItemCost, showRecipeAudit);
         return { fileObj: reportExcel, contentType: 'application/vnd.ms-excel', filename: `${baseName}.xls` };
     };
 
@@ -240,7 +305,7 @@ define([
                 `History: ${preebookData.custrecord_sgp_pb_historical_start_date} - ${preebookData.custrecord_sgp_pb_historical_end_date}`,
                 `Current: ${preebookData.custrecord_sgp_pb_current_start_date} - ${preebookData.custrecord_sgp_pb_currency_end_date}`
             ],
-            headers: ALL_HEADERS,
+            headers: getAllHeaders(showRecipeAudit),
             rows: buildHardgoodsPreviewRows(bomRows, showRecipeAudit),
             rowCount: bomRows.length
         };
@@ -268,11 +333,20 @@ define([
             ];
 
             if (recipes.length > 0) {
+                if (showRecipeAudit) {
+                    // CODE DESCRIPTION/CUST/CUSTOMER NAME en blanco: la 1ra receta baja a
+                    // sub-fila (igual que las demás — ver recipesForSubRows abajo). En su
+                    // lugar, SUBTOTAL UNITS muestra el desglose "suma * bomQuantity".
+                    cells.push('', '', '', buildSubtotalUnitsDisplay(row));
+                } else {
+                    cells.push(
+                        first.recipe_code + ((first.recipedescription || '').trim() ? ' - ' + first.recipedescription : ''),
+                        safeStr(first.customer_code),
+                        safeStr(first.customer_name)
+                    );
+                }
                 cells.push(
-                    first.recipe_code + ((first.recipedescription || '').trim() ? ' - ' + first.recipedescription : ''),
-                    safeStr(first.customer_code),
-                    safeStr(first.customer_name),
-                    fmtNumber(row.totalUnits),  // TOTAL UNITS (suma de todas las recetas)
+                    fmtNumber(row.totalUnits),  // TOTAL UNITS (suma de todas las recetas) — sin cambios
                     fmtNumber(row.plus_minus),             // "+ -": LOC1 + PO QTY - TOTAL UNITS
                     String(row.fob_cost || 0),
                     String(row.landed_cost || 0),
@@ -283,31 +357,48 @@ define([
                     ''                                      // PREP PRODUCTION
                 );
             } else {
-                cells.push('', '', '', '', '', '', '', '', '', '', '', '');
+                cells.push('', '', '');
+                if (showRecipeAudit) cells.push('');
+                cells.push('', '', '', '', '', '', '', '', '');
             }
 
-            const toSubRow = (recipe) => ({
-                cells: [
-                    '', '', '', '', '',
+            const toSubRow = (recipe) => {
+                const c = ['', '', '', '', ''];
+                c.push(
                     recipe.recipe_code + ((recipe.recipedescription || '').trim() ? ' - ' + recipe.recipedescription : ''),
                     safeStr(recipe.customer_code),
-                    safeStr(recipe.customer_name),
-                    // TOTAL UNITS de la sub-fila: solo con "Show recipe audit" activo
-                    // (checkbox desmarcado por defecto); si no, queda en blanco.
-                    // Los 8 restantes ("+ -", FOB COST, LANDED COST, LOC1/LOC2 OH UNITS,
-                    // PO QTY, PO RCVD, PREP PROD.) no aplican a nivel receta individual.
-                    (showRecipeAudit && recipe.subTotalUnits != null) ? fmtNumber(recipe.subTotalUnits) : '',
-                    '', '', '', '', '', '', '', ''
-                ],
-                // Solo display (toggle "See all sub total units"): total units de esta receta.
-                subTotalUnits: recipe.subTotalUnits != null ? fmtNumber(recipe.subTotalUnits) : ''
-            });
+                    safeStr(recipe.customer_name)
+                );
+                // SUBTOTAL UNITS: aporte de ESTA receta al SUM de row0, solo con
+                // "Show recipe audit" activo (checkbox desmarcado por defecto). En row0
+                // esta misma columna muestra el desglose "suma * bomQuantity"; acá el
+                // valor individual (subTotalUnits / multiplicador — ver buildRecipeSubtotalDisplay).
+                if (showRecipeAudit) {
+                    c.push(buildRecipeSubtotalDisplay(row, recipe));
+                }
+                c.push(
+                    // TOTAL UNITS: en blanco en sub-filas — solo tiene valor en la fila
+                    // principal (row0). Los 8 restantes ("+ -", FOB COST, LANDED COST,
+                    // LOC1/LOC2 OH UNITS, PO QTY, PO RCVD, PREP PROD.) no aplican a nivel
+                    // receta individual.
+                    '', '', '', '', '', '', '', '', ''
+                );
+                return {
+                    cells: c,
+                    // Solo display (toggle "See all sub total units"): total units de esta receta.
+                    subTotalUnits: recipe.subTotalUnits != null ? fmtNumber(recipe.subTotalUnits) : ''
+                };
+            };
 
-            // Primeras 5 recetas SIEMPRE visibles (1 en `cells` + hasta 4 en visibleSubRows);
-            // de la 6ta en adelante quedan detrás del toggle "View more recipes" (subRows).
-            const extraRecipes = recipes.slice(1);
-            const visibleSubRows = extraRecipes.slice(0, 4).map(toSubRow);
-            const subRows = extraRecipes.slice(4).map(toSubRow);
+            // Sin audit: recipes[0] va en la fila principal (cells arriba), el resto en
+            // sub-filas — igual que siempre. Con audit: la fila principal no muestra
+            // ninguna receta puntual, así que TODAS (incluida recipes[0]) van en
+            // sub-filas; se sube el cupo de "siempre visibles" de 4 a 5 para mantener
+            // la misma cantidad total de filas visibles antes del toggle "View more".
+            const recipesForSubRows = showRecipeAudit ? recipes : recipes.slice(1);
+            const alwaysVisibleCount = showRecipeAudit ? 5 : 4;
+            const visibleSubRows = recipesForSubRows.slice(0, alwaysVisibleCount).map(toSubRow);
+            const subRows = recipesForSubRows.slice(alwaysVisibleCount).map(toSubRow);
 
             return {
                 cells: cells,
@@ -331,6 +422,11 @@ define([
         try {
             const showCost = showItemCost !== false;
             const costHidden = showCost ? '' : ' ss:Hidden="1"';
+            // Con "Show recipe audit" activo, SUBTOTAL UNITS se inserta como columna 9
+            // (antes de TOTAL UNITS), corriendo 1 posición todo lo que sigue — de ahí
+            // este offset aplicado a los <Column ss:Index="..."> desde TOTAL UNITS en
+            // adelante (incluye los índices de FOB/LANDED COST usados por costHidden).
+            const idxOffset = showRecipeAudit ? 1 : 0;
 
             // Escapan XML (&, <, >); isEmptyValue blinda contra ScriptNullObjectAdapter.
             const escapeXml = (v) => isEmptyValue(v) ? '' :
@@ -392,14 +488,15 @@ define([
                 '<Column ss:Index="6" ss:Width="120.60000000000001"/>\n' +
                 '<Column ss:Index="7" ss:Width="28.8"/>\n' +
                 '<Column ss:Index="8" ss:Width="87"/>\n' +
-                '<Column ss:Index="9" ss:Width="64.2"/>\n' +
-                '<Column ss:Index="10" ss:Width="24"/>\n' +
-                '<Column ss:Index="11" ss:Width="49.2"' + costHidden + '/>\n' +
-                '<Column ss:Index="12" ss:Width="67.8"' + costHidden + '/>\n' +
-                '<Column ss:Index="13" ss:Width="75"/>\n' +
-                '<Column ss:Index="14" ss:Width="75"/>\n' +
-                '<Column ss:Index="15" ss:Width="38.4"/>\n' +
-                '<Column ss:Index="16" ss:Width="91.8"/>\n' +
+                (showRecipeAudit ? '<Column ss:Index="9" ss:Width="70"/>\n' : '') +
+                '<Column ss:Index="' + (9 + idxOffset) + '" ss:Width="64.2"/>\n' +
+                '<Column ss:Index="' + (10 + idxOffset) + '" ss:Width="24"/>\n' +
+                '<Column ss:Index="' + (11 + idxOffset) + '" ss:Width="49.2"' + costHidden + '/>\n' +
+                '<Column ss:Index="' + (12 + idxOffset) + '" ss:Width="67.8"' + costHidden + '/>\n' +
+                '<Column ss:Index="' + (13 + idxOffset) + '" ss:Width="75"/>\n' +
+                '<Column ss:Index="' + (14 + idxOffset) + '" ss:Width="75"/>\n' +
+                '<Column ss:Index="' + (15 + idxOffset) + '" ss:Width="38.4"/>\n' +
+                '<Column ss:Index="' + (16 + idxOffset) + '" ss:Width="91.8"/>\n' +
                 '<Row>\n' +
                 '<Cell ss:Index="4" ss:StyleID="sPlain"><Data ss:Type="String">WO720 Report # ' + escapeXml(prebookId) + '</Data></Cell>\n' +
                 '<Cell ss:Index="6" ss:StyleID="sPlain"><Data ss:Type="String">WHERE USED REPORTING</Data></Cell>\n' +
@@ -420,18 +517,26 @@ define([
 
             // Filas de datos
             rows.forEach(row => {
-                let firstRecipe = row.recipes && row.recipes.length > 0 ? row.recipes[0] : null;
+                const recipes = row.recipes || [];
+                let firstRecipe = recipes.length > 0 ? recipes[0] : null;
                 xmlString += '<Row>';
                 xmlString += strCell(row.cat);
                 xmlString += strCell(row.product);
                 xmlString += strCell(row.description);
                 xmlString += strCell(row.type);
                 xmlString += numCell(row.num_recipes);
-                if (row.recipes.length > 0) {
-                    xmlString += strCell(firstRecipe.recipe_code + ((firstRecipe.recipedescription || '').trim() ? " - " : "") + firstRecipe.recipedescription);
-                    xmlString += strCell(firstRecipe.customer_code);
-                    xmlString += strCell(firstRecipe.customer_name);
-                    xmlString += strCell(fmtNumber(row.totalUnits));
+                if (recipes.length > 0) {
+                    if (showRecipeAudit) {
+                        // CODE DESCRIPTION/CUST/CUSTOMER NAME en blanco: recipes[0] baja a
+                        // sub-fila (ver más abajo, junto con el resto de recetas).
+                        xmlString += EMPTY + EMPTY + EMPTY;
+                        xmlString += strCell(buildSubtotalUnitsDisplay(row));   // SUBTOTAL UNITS (solo esta fila)
+                    } else {
+                        xmlString += strCell(firstRecipe.recipe_code + ((firstRecipe.recipedescription || '').trim() ? " - " : "") + firstRecipe.recipedescription);
+                        xmlString += strCell(firstRecipe.customer_code);
+                        xmlString += strCell(firstRecipe.customer_name);
+                    }
+                    xmlString += strCell(fmtNumber(row.totalUnits));  // TOTAL UNITS — sin cambios
                     xmlString += strCell(fmtNumber(row.plus_minus));    // "+ -": LOC1 + PO QTY - TOTAL UNITS
                     xmlString += strCell(row.fob_cost);
                     xmlString += strCell(row.landed_cost);
@@ -441,28 +546,33 @@ define([
                     xmlString += strCell(fmtNumber(row.po_qty));        // bajo "PO RECEIVED" (réplica invertida del Excel)
                     xmlString += EMPTY;                      // PREP PRODUCTION
                     xmlString += '</Row>';
-                    // Máximo 5 recetas mostradas (1 en la fila principal + hasta 4 sub-filas),
-                    // aunque haya más — # RECIPES y TOTAL UNITS siguen reflejando el total real.
-                    row.recipes.slice(0, 5).forEach((recipe, index) => {
-                        if (index === 0) return; // ya impresa en la fila principal
+                    // Sin audit: recipes[0] ya se imprimió arriba, el resto (hasta 4) en
+                    // sub-filas. Con audit: la fila principal no imprime ninguna receta,
+                    // así que TODAS (incluida recipes[0], hasta 5) van en sub-filas —
+                    // mismo cupo total de 5 recetas mostradas en ambos casos.
+                    const recipesForSubRows = showRecipeAudit ? recipes : recipes.slice(1);
+                    recipesForSubRows.slice(0, showRecipeAudit ? 5 : 4).forEach((recipe) => {
                         xmlString += '<Row>';
                         xmlString += EMPTY + EMPTY + EMPTY + EMPTY + EMPTY;
                         xmlString += strCell(recipe.recipe_code + ((recipe.recipedescription || '').trim() ? " - " : "") + recipe.recipedescription);
                         xmlString += strCell(recipe.customer_code);
                         xmlString += strCell(recipe.customer_name);
-                        // TOTAL UNITS de esta receta: solo con "Show recipe audit" activo
-                        // (checkbox desmarcado por defecto); si no, celda vacía (igual que antes).
-                        xmlString += (showRecipeAudit && recipe.subTotalUnits != null)
-                            ? strCell(fmtNumber(recipe.subTotalUnits))
-                            : EMPTY;
-                        // "+ -", FOB COST, LANDED COST, LOC1/LOC2 OH UNITS, PO QTY, PO RCVD,
-                        // PREP PROD. no aplican a nivel receta individual.
-                        xmlString += EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY;
+                        // SUBTOTAL UNITS: aporte de ESTA receta al SUM de row0, solo con
+                        // "Show recipe audit" activo (subTotalUnits / multiplicador —
+                        // ver buildRecipeSubtotalDisplay).
+                        if (showRecipeAudit) {
+                            xmlString += recipe.subTotalUnits != null ? strCell(buildRecipeSubtotalDisplay(row, recipe)) : EMPTY;
+                        }
+                        // TOTAL UNITS: en blanco en sub-filas — solo tiene valor en la fila
+                        // principal (row0). "+ -", FOB COST, LANDED COST, LOC1/LOC2 OH UNITS,
+                        // PO QTY, PO RCVD, PREP PROD. tampoco aplican a nivel receta individual.
+                        xmlString += EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY;
                         xmlString += '</Row>';
                     });
                 } else {
-                    xmlString += EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY +
-                        EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY;
+                    xmlString += EMPTY + EMPTY + EMPTY;
+                    if (showRecipeAudit) xmlString += EMPTY;
+                    xmlString += EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY + EMPTY;
                     xmlString += '</Row>';
                 }
             });
@@ -559,9 +669,15 @@ define([
             // SuiteScript error" en renderAsPdf() (solo reproducible con "Show recipe
             // audit" activo). Evitamos el problema formateando en JS, no en el template.
             const reportForPdf = rows.map((row) => Object.assign({}, row, {
+                // subTotalUnitsDisplay por receta = su aporte al SUM de row0
+                // (subTotalUnits / multiplicador — ver buildRecipeSubtotalDisplay), NO
+                // el subTotalUnits completo.
                 recipes: (row.recipes || []).slice(0, 5).map((r) => Object.assign({}, r, {
-                    subTotalUnitsDisplay: r.subTotalUnits != null ? fmtNumber(r.subTotalUnits) : ''
-                }))
+                    subTotalUnitsDisplay: buildRecipeSubtotalDisplay(row, r)
+                })),
+                // SUBTOTAL UNITS (solo fila 0, con "Show recipe audit" activo) — mismo
+                // motivo que subTotalUnitsDisplay: se formatea en JS, no en el .ftl.
+                subtotalUnitsDisplay: showRecipeAudit ? buildSubtotalUnitsDisplay(row) : ''
             }));
             renderer.addCustomDataSource({
                 format: render.DataSource.JSON,

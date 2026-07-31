@@ -21,8 +21,14 @@
       - FOB COST / LANDED COST se omiten por completo (colgroup + celdas) cuando
         data.metadata.showItemCost es false (checkbox "Show item cost" del preview).
       - TOTAL UNITS de la sub-fila de cada receta adicional solo se imprime
-        (recipe.subTotalUnits) cuando data.metadata.showRecipeAudit es 'T'
+        (recipe.subTotalUnitsDisplay) cuando data.metadata.showRecipeAudit es 'T'
         (checkbox "Show recipe audit" del preview, desmarcado por defecto).
+      - Con showRecipeAudit='T' además: aparece la columna SUBTOTAL UNITS (solo
+        con valor en la fila principal, row.subtotalUnitsDisplay = "suma *
+        bomQuantity" cuyo resultado es TOTAL UNITS, que no cambia de valor) y
+        CODE DESCRIPTION/CUST/CUSTOMER NAME de la fila principal quedan en
+        blanco porque la receta que antes iba ahí (recipes[0]) baja a sub-fila
+        junto con las demás.
     ============================================================================
 -->
 <#setting number_format="computer">
@@ -154,6 +160,9 @@
             <col width="10.5%"/> <#-- CODE DESCRIPTION -->
             <col width="2.5%"/>  <#-- CUST -->
             <col width="7.6%"/>  <#-- CUSTOMER NAME -->
+            <#if showRecipeAudit>
+            <col width="4.5%"/>  <#-- SUBTOTAL UNITS -->
+            </#if>
             <col width="5.6%"/>  <#-- TOTAL UNITS -->
             <col width="2.1%"/>  <#-- + - -->
             <#if showItemCost>
@@ -203,11 +212,20 @@
                         <td align="right">${fmtNum(row.num_recipes)?number?string.number}</td>
 
                         <#if (row.recipes?size > 0)>
-                            <#assign r0 = row.recipes[0]>
-                            <#assign codeDesc0 = (r0.recipe_code!"") + (((r0.recipedescription!"")?trim?has_content)?then(' - ' + (r0.recipedescription!""), ''))>
-                            <td class="trunc">${codeDesc0?truncate(CODEDESC_LIMIT, "")?xml}</td>
-                            <td align="right">${(r0.customer_code!"")?xml}</td>
-                            <td class="trunc">${(r0.customer_name!"")?truncate(CUSTNAME_LIMIT, "")?xml}</td>
+                            <#if showRecipeAudit>
+                                <#-- CODE DESCRIPTION/CUST/CUSTOMER NAME en blanco: recipes[0]
+                                     baja a sub-fila (ver más abajo, junto con las demás). -->
+                                <td>&nbsp;</td>
+                                <td>&nbsp;</td>
+                                <td>&nbsp;</td>
+                                <td align="right">${(row.subtotalUnitsDisplay!"")?xml}</td>
+                            <#else>
+                                <#assign r0 = row.recipes[0]>
+                                <#assign codeDesc0 = (r0.recipe_code!"") + (((r0.recipedescription!"")?trim?has_content)?then(' - ' + (r0.recipedescription!""), ''))>
+                                <td class="trunc">${codeDesc0?truncate(CODEDESC_LIMIT, "")?xml}</td>
+                                <td align="right">${(r0.customer_code!"")?xml}</td>
+                                <td class="trunc">${(r0.customer_name!"")?truncate(CUSTNAME_LIMIT, "")?xml}</td>
+                            </#if>
                             <td align="right">${fmtNum(row.totalUnits)?number?string.number}</td>
                             <td align="right">${fmtNum(row.plus_minus)?number?string.number}</td>
                             <#if showItemCost>
@@ -222,6 +240,7 @@
                         <#else>
                             <#-- Item sin recetas: columnas restantes en blanco -->
                             <td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td>
+                            <#if showRecipeAudit><td>&nbsp;</td></#if>
                             <td>&nbsp;</td><td>&nbsp;</td>
                             <#if showItemCost><td>&nbsp;</td><td>&nbsp;</td></#if>
                             <td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td>
@@ -229,10 +248,14 @@
                         </#if>
                     </tr>
 
-                    <#-- ───── Sub-filas para recetas adicionales (índice > 0) ───── -->
-                    <#if (row.recipes?size > 1)>
+                    <#-- ───── Sub-filas para recetas adicionales (índice > 0) ─────
+                         Con "Show recipe audit" activo, recipes[0] TAMBIÉN baja a
+                         sub-fila (la fila principal ya no muestra ninguna receta
+                         puntual — ver bloque de arriba), así que el índice 0 deja
+                         de excluirse en ese modo. -->
+                    <#if (row.recipes?size > 1) || (showRecipeAudit && (row.recipes?size > 0))>
                         <#list row.recipes as recipe>
-                            <#if (recipe?index > 0)>
+                            <#if (recipe?index > 0) || showRecipeAudit>
                                 <#assign codeDescN = (recipe.recipe_code!"") + (((recipe.recipedescription!"")?trim?has_content)?then(' - ' + (recipe.recipedescription!""), ''))>
                                 <tr>
                                     <td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td>
@@ -240,19 +263,22 @@
                                     <td class="trunc">${codeDescN?truncate(CODEDESC_LIMIT, "")?xml}</td>
                                     <td align="right">${(recipe.customer_code!"")?xml}</td>
                                     <td class="trunc">${(recipe.customer_name!"")?truncate(CUSTNAME_LIMIT, "")?xml}</td>
-                                    <#-- TOTAL UNITS de esta receta: solo con "Show recipe audit" activo
-                                         (checkbox desmarcado por defecto); si no, celda vacía (igual que antes).
-                                         Se imprime como STRING (subTotalUnitsDisplay, ya formateado en JS con
-                                         fmtNumber en crearPDF), NO con ?number?string.number: ese número vive
-                                         anidado dentro de `recipes` y, a diferencia de los números de nivel
-                                         superior (row.totalUnits, etc.), el data source JSON de NetSuite no lo
-                                         expone igual — ?number ahí tiraba "An unexpected SuiteScript error"
-                                         en renderAsPdf(). Mismo patrón que customer_code/customer_name (?xml). -->
+                                    <#-- SUBTOTAL UNITS: cantidad de ESTA receta, solo con "Show recipe
+                                         audit" activo (checkbox desmarcado por defecto). En row0 esta
+                                         misma columna muestra el desglose "suma * bomQuantity"; acá el
+                                         valor individual. Se imprime como STRING (subTotalUnitsDisplay,
+                                         ya formateado en JS con fmtNumber en crearPDF), NO con
+                                         ?number?string.number: ese número vive anidado dentro de `recipes`
+                                         y, a diferencia de los números de nivel superior (row.totalUnits,
+                                         etc.), el data source JSON de NetSuite no lo expone igual —
+                                         ?number ahí tiraba "An unexpected SuiteScript error" en
+                                         renderAsPdf(). Mismo patrón que customer_code/customer_name (?xml). -->
                                     <#if showRecipeAudit>
                                     <td align="right">${(recipe.subTotalUnitsDisplay!"")?xml}</td>
-                                    <#else>
-                                    <td>&nbsp;</td>
                                     </#if>
+                                    <#-- TOTAL UNITS: en blanco en sub-filas — solo tiene valor en la
+                                         fila principal (row0). -->
+                                    <td>&nbsp;</td>
                                     <td>&nbsp;</td><#-- "+ -": no aplica a nivel receta -->
                                     <#if showItemCost><td>&nbsp;</td><td>&nbsp;</td></#if>
                                     <td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td>
@@ -263,8 +289,9 @@
                     </#if>
                 </#list>
             <#else>
+                <#assign emptyColspan = (showItemCost?then(17,15)) + (showRecipeAudit?then(1,0))>
                 <tr>
-                    <td colspan="${showItemCost?then(17,15)}" class="empty-msg" align="center">
+                    <td colspan="${emptyColspan}" class="empty-msg" align="center">
                         No hardgoods data to display for this Prebook.
                     </td>
                 </tr>

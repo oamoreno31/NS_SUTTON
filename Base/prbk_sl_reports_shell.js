@@ -454,16 +454,7 @@ define([
                 return `<button type="button" class="${cls}" onclick="pbDownload('${escapeHtml(opt.value)}')">${icon}&nbsp;&nbsp;Download ${escapeHtml(opt.text)}</button>`;
             }).join('\n') : '';
 
-        // Checkboxes previewChoice genéricos (p.ej. "Show item cost" en R1): ocultan/
-        // muestran, en el preview, las columnas cuyo header calce con def.hideColumns.
-        // El valor viaja al server en el mismo hidden field que usa pbDownload/generate.
-        // Checkboxes SIN hideColumns (p.ej. "Show recipe audit" en R1): no ocultan
-        // columnas completas (la columna sigue visible siempre, p.ej. porque la fila
-        // principal ya la usa) — solo revelan un valor calculado server-side que hoy
-        // se manda en blanco. Como el contenido de la celda cambia (no solo su CSS),
-        // no se puede resolver instantáneo en el cliente: el checkbox reenvía el
-        // formulario completo (pbSetHiddenAndRefresh) y el preview se vuelve a
-        // renderizar server-side con el nuevo valor del filtro.
+        // Checkboxes previewChoice: con hideColumns ocultan/muestran columnas client-side; sin hideColumns, reenvían el form (refresh server-side).
         const toggleDefs = filters.filter((def) => def.previewChoice &&
             String(def.type || '').toLowerCase() === 'checkbox');
         const toggleHtml = toggleDefs.map((def) => {
@@ -603,24 +594,14 @@ define([
         }).join('\\n');
     };
 
-    // Toggle "refresh" (p.ej. "Show recipe audit"): a diferencia de pbToggleColumns,
-    // el dato que cambia no es la visibilidad de una columna sino el CONTENIDO de
-    // celdas puntuales (sub-filas de receta), calculado server-side. Por eso no hay
-    // CSS instantáneo posible acá: se guarda el valor en el hidden field y se
-    // reenvía el formulario (misma acción 'preview' con la que ya se refresca al
-    // tocar "Refresh Preview"), para que el server vuelva a armar el preview con
-    // el nuevo valor del filtro.
+    // Toggle "refresh": el contenido de la celda cambia server-side, así que reenvía el formulario en vez de tocar CSS.
     window.pbSetHiddenAndRefresh = function (checkbox, hiddenFieldId) {
         var hiddenEl = document.getElementById(hiddenFieldId);
         if (hiddenEl) hiddenEl.value = checkbox.checked ? 'T' : 'F';
         var f = (typeof document !== 'undefined') ? document.forms['main_form'] : null;
         if (f && typeof f.submit === 'function') f.submit();
     };
-    // Solo los toggles de tipo "ocultar columna" (hideColumns) necesitan disparar
-    // su 'change' inicial para pintar el CSS de oculto cuando arrancan desmarcados.
-    // Los toggles "refresh" (p.ej. "Show recipe audit") NO deben entrar acá: su
-    // 'change' resubmite el formulario completo, y si arrancan desmarcados
-    // (su estado normal) se generaría un reenvío en cada carga del preview.
+    // Solo los toggles hideColumns disparan su 'change' inicial; los toggles "refresh" no, para no reenviar el form al cargar.
     root.querySelectorAll('.pb-col-toggle input[type=checkbox]').forEach(function (cb) {
         if (!cb.checked) cb.dispatchEvent(new Event('change'));
     });

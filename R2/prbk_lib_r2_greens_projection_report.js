@@ -20,6 +20,29 @@ define([
 
     const MAX_XLS_BYTES = 9.8 * 1024 * 1024;
 
+    // Header set completo, con las 2 columnas de auditoría ya incluidas, en el
+    // orden en que se leen como ecuación: SUBTOTAL (cascada del BOM, antes de
+    // multiplicar) * SOLD (la proyección del Prebook, fase 5) =
+    // STEMS NEEDED (el resultado). SOLD = row.soldBunches (projectedQty);
+    // SUBTOTAL = row.subtotal (suma de compTotals SIN multiplicar).
+    const ALL_HEADERS = ['CAT', 'PRODUCT CODE', 'PRODUCT DESCRIPTION', 'PACK PK/STM', 'SOLD', 'SUBTOTAL', 'STEMS NEEDED',
+        'BUNCHES NEEDED', 'CASES NEEDED', 'QUANTITY ONHAND', 'UNIT PREP COMP', 'PO RECVD LOC1',
+        'IN BOUND LOC1', 'CASES SHORT LOC1', 'CASES OVER LOC1'];
+
+    const AUDIT_HEADERS = ['SOLD', 'SUBTOTAL'];
+
+    /** true si el checkbox "Show audit" está marcado (desmarcado por defecto). */
+    const isShowAudit = (filterValues) =>
+        String((filterValues || {}).show_audit || 'F').toUpperCase() === 'T';
+
+    /** Headers para Excel/PDF (la descarga real, no el preview): sin "Show audit"
+     *  marcado, se quitan SOLD/SUBTOTAL por completo del set de columnas
+     *  — a diferencia del preview (que usa ALL_HEADERS siempre + hideColumns
+     *  client-side, ver getFilterDefinitions), acá si no se filtra el header
+     *  quedaría una columna de más sin celda correspondiente en las filas. */
+    const getHeaders = (showAudit) =>
+        showAudit ? ALL_HEADERS : ALL_HEADERS.filter((h) => AUDIT_HEADERS.indexOf(h) === -1);
+
     const getMetadata = () => ({
         id: 'GREENS_PROJECTION',
         name: 'All Raw Materials Projection - Greens',
@@ -48,6 +71,15 @@ define([
             ],
             helpText: 'Select the document format to generate (Excel or PDF).',
             previewChoice: true
+        },
+        {
+            id: 'show_audit',
+            label: 'Show audit',
+            type: 'checkbox',
+            defaultValue: 'F',
+            helpText: 'Reveals SOLD and SUBTOTAL: the Prebook projection quantity and the pre-multiplication BOM cascade used to calculate STEMS NEEDED.',
+            previewChoice: true,
+            hideColumns: AUDIT_HEADERS
         }
     ]);
 
@@ -91,17 +123,16 @@ define([
         const rows = loadBomComponents(prebookId, currentStart, currentEnd);
         log.audit('GREENS.rows', `count=${rows.length}`);
 
-        const headers = ['CAT', 'PRODUCT CODE', 'PRODUCT DESCRIPTION', 'PACK PK/STM', 'STEMS NEEDED',
-            'BUNCHES NEEDED', 'CASES NEEDED', 'QUANTITY ONHAND', 'UNIT PREP COMP', 'PO RECVD LOC1',
-            'IN BOUND LOC1', 'CASES SHORT LOC1', 'CASES OVER LOC1'];
+        const showAudit = isShowAudit(filterValues);
+        const headers = getHeaders(showAudit);
         const baseName = `Greens_Projection_${String(preebookData?.name).replace(/\s+/g, '_')}_${nowStamp()}`;
 
         if (format === 'PDF') {
-            const reportPdf = crearPDF(headers, rows, `${baseName}.pdf`, prebookId, preebookData);
+            const reportPdf = crearPDF(headers, rows, `${baseName}.pdf`, prebookId, preebookData, showAudit);
             return { fileObj: reportPdf, contentType: 'PDF', filename: `${baseName}.pdf` };
         }
 
-        const reportExcel = crearExcel(headers, rows, `${baseName}.xlsx`, prebookId, preebookData);
+        const reportExcel = crearExcel(headers, rows, `${baseName}.xlsx`, prebookId, preebookData, showAudit);
         return { fileObj: reportExcel, contentType: 'application/vnd.ms-excel', filename: `${baseName}.xls` };
     };
 
@@ -129,12 +160,16 @@ define([
 
         const rows = loadBomComponents(prebookId, currentStart, currentEnd);
 
-        const headers = ['CAT', 'PRODUCT CODE', 'PRODUCT DESCRIPTION', 'PACK PK/STM', 'STEMS NEEDED',
-            'BUNCHES NEEDED', 'CASES NEEDED', 'QUANTITY ONHAND', 'UNIT PREP COMP', 'PO RECVD LOC1',
-            'IN BOUND LOC1', 'CASES SHORT LOC1', 'CASES OVER LOC1'];
+        // El preview siempre manda el set completo de headers (incluidas SOLD
+        // BUNCHES y SUBTOTAL): el checkbox "Show audit" oculta/muestra esas
+        // columnas client-side vía hideColumns (ver getFilterDefinitions), sin
+        // necesidad de volver a pedir el preview al server. Excel/PDF sí filtran
+        // de verdad (ver generate() → getHeaders/showAudit).
+        const headers = ALL_HEADERS;
 
         const flatRows = rows.map((r) => ([
             safeStr(r.cat), safeStr(r.productCode), safeStr(r.description), safeStr(r.pkstm),
+            String(r.soldBunches || 0), String(r.subtotal || 0),
             String(r.stemsNeeded || 0), String(r.bunchesNeeded || 0), String(r.casesNeeded || 0),
             String(r.qtyOnHand || 0), String(r.unitprepcomp || 0), String(r.poReceived || 0),
             String(r.inBound || 0),
@@ -156,7 +191,7 @@ define([
         };
     };
 
-    const crearExcel = (headers, rows, fileName, prebookId, preebookData) => {
+    const crearExcel = (headers, rows, fileName, prebookId, preebookData, showAudit) => {
         try {
             const escapeXml = (v) => isEmptyValue(v) ? '' :
                 String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -203,6 +238,8 @@ define([
                 '<Column ss:Width="60"/>\n' +
                 '<Column ss:Width="160"/>\n' +
                 '<Column ss:Width="60"/>\n' +
+                (showAudit ? '<Column ss:Width="60"/>\n' : '') +   // SOLD
+                (showAudit ? '<Column ss:Width="60"/>\n' : '') +   // SUBTOTAL
                 '<Column ss:Width="65"/>\n' +
                 '<Column ss:Width="60"/>\n' +
                 '<Column ss:Width="65"/>\n' +
@@ -230,6 +267,10 @@ define([
                 xmlString += strCell(row.productCode);
                 xmlString += strCell(row.description);
                 xmlString += strCell(row.pkstm);
+                if (showAudit) {
+                    xmlString += strCell(row.soldBunches);
+                    xmlString += strCell(row.subtotal);
+                }
                 xmlString += strCell(row.stemsNeeded);
                 xmlString += strCell(row.bunchesNeeded);
                 xmlString += strCell(row.casesNeeded);
@@ -287,7 +328,7 @@ define([
         return results.length ? results[0].id : null;
     };
 
-    const crearPDF = (headers, rows, fileName, prebookId, preebookData) => {
+    const crearPDF = (headers, rows, fileName, prebookId, preebookData, showAudit) => {
         try {
             const templateFileId = findTemplateFileId(GR_TEMPLATE_FILENAME);
             if (!templateFileId) {
@@ -321,7 +362,11 @@ define([
                         loc1Label: LOC1_LABEL,
                         generatedAt: nowStamp(),
                         generatedAtDisplay: nowDisplayStamp(),
-                        totalRows: rows.length
+                        totalRows: rows.length,
+                        // 'T'/'F' en vez de boolean: mismo criterio que R1 (showItemCost/
+                        // showRecipeAudit) — un boolean JSON no garantiza tipo en el data
+                        // source de FreeMarker y puede evaluar mal en <#if>.
+                        showAudit: (showAudit === true) ? 'T' : 'F'
                     }
                 })
             });
@@ -477,6 +522,37 @@ define([
                     'Fase 2: SIN resultados — ningún green tiene su propia BOM vigente (activa, sin "*", dentro del rango CURRENT). STEMS/BUNCHES/CASES NEEDED quedarán en 0 para todos.');
             }
 
+            // ── 5. Proyecciones del Prebook por GREEN ───────────────────────
+            //      Mismo patrón que fase 5 de R1 (customrecord_sgp_prebook_projection_rp),
+            //      pero buscando directamente por el green: acá el green YA es el
+            //      producto terminado (ver corrección de dirección del 2026-07-30),
+            //      no hace falta resolver un "producto terminado" aparte como en R1.
+            //      STEMS NEEDED se multiplica por esta proyección en fase 9 — sin
+            //      proyección, el green no se muestra (mismo criterio que TOTAL UNITS=0
+            //      en R1).
+            phase = '5-proyecciones prebook (por green)';
+            const projectedQtyByGreen = {};
+            chunkIds(greenItemIds, 1000).forEach((inList) => {
+                runSuiteQLAll(`
+                    SELECT
+                        pj.custrecord_sgp_product_code AS item_id,
+                        SUM(pj.custrecord_sgp_prebook_qty) AS total_qty
+                    FROM customrecord_sgp_prebook_projection_rp pj
+                    WHERE pj.custrecord_sgp_prebook_id_detail = ?
+                      AND pj.isinactive = 'F'
+                      AND pj.custrecord_sgp_product_code IN (${inList})
+                    GROUP BY pj.custrecord_sgp_product_code
+                `, [prebookId]).forEach((r) => {
+                    projectedQtyByGreen[String(r.item_id)] = Number(r.total_qty) || 0;
+                });
+            });
+            log.audit('GREENS.loadBomComponents',
+                `Fase 5: proyecciones obtenidas para ${Object.keys(projectedQtyByGreen).length} de ${greenItemIds.length} greens (custrecord_sgp_prebook_id_detail=${prebookId}).`);
+            if (!Object.keys(projectedQtyByGreen).length) {
+                log.audit('GREENS.loadBomComponents',
+                    'Fase 5: SIN proyecciones — revisar customrecord_sgp_prebook_projection_rp.custrecord_sgp_prebook_id_detail=' + prebookId + ' con líneas activas para estos greens. STEMS/BUNCHES/CASES NEEDED quedarán en 0 para todos.');
+            }
+
             phase = '6-po qty y recibido (LOC1)';
             const poByItem = {};
             let totalPoRows = 0;
@@ -565,7 +641,7 @@ define([
                 `Fase 8: Assembly Build filas=${totalPrepRows}, greens con producción=${Object.keys(prepByItem).length} de ${greenItemIds.length} (custbody_sgp_report_id=${prebookId})`);
 
             phase = '9-armado filas';
-            let itemsNoRevData = 0;
+            let itemsNoRevData = 0, itemsNoProjection = 0;
             let itemsWithStems = 0, itemsWithOnHand = 0, itemsWithPoReceived = 0, itemsWithPrep = 0;
             results_gnl.forEach((r) => {
                 const itemId = String(r.item);
@@ -575,6 +651,7 @@ define([
                 const revMap = explosionByGreen[itemId] || {};
                 const revIds = Object.keys(revMap);
                 if (!revIds.length) itemsNoRevData++;
+                if (!projectedQtyByGreen[itemId]) itemsNoProjection++;
 
                 // Dedup: 1 mejor revisión (la de ID más alto) por cada BOM propia del
                 // green que calificó — normalmente un green tiene una sola BOM, pero
@@ -601,14 +678,31 @@ define([
                         compTotals[compId].quantity += comps[compId].quantity;
                     });
                 });
+
+                // Proyección del Prebook para ESTE green (fase 5) — mismo criterio que
+                // R1: MRP en cascada, projectedQty del producto terminado × bomQuantity
+                // del componente. Sin proyección → 0 (el ítem no se muestra, ver filtro
+                // de stemsNeeded más abajo).
+                const projectedQty = projectedQtyByGreen[itemId] || 0;
+
+                // SUBTOTAL (columna de auditoría, "Show audit"): la cascada del BOM
+                // ANTES de multiplicar por la proyección — mismo número que stemsNeeded
+                // representaba antes de esta sesión, cuando aún no existía fase 5.
+                // SUBTOTAL * SOLD (projectedQty) === STEMS NEEDED, siempre.
+                const subtotal = Object.keys(compTotals)
+                    .reduce((sum, compId) => sum + (compTotals[compId].quantity || 0), 0);
+
                 const components = Object.keys(compTotals).map((compId) => ({
                     componentItemId: compId,
                     componentCode: compTotals[compId].code,
                     componentDescription: compTotals[compId].description,
-                    quantity: compTotals[compId].quantity
+                    // Cantidad de este subcomponente YA multiplicada por la proyección,
+                    // para que sumar components[].quantity siga reconstruyendo STEMS NEEDED.
+                    quantity: compTotals[compId].quantity * projectedQty
                 })).sort((a, b) => b.quantity - a.quantity);
 
-                // STEMS NEEDED = suma de las cantidades de todos los subcomponentes.
+                // STEMS NEEDED = suma de las cantidades de todos los subcomponentes
+                // (cada una ya multiplicada por la proyección del green).
                 const stemsNeeded = components.reduce((sum, c) => sum + (c.quantity || 0), 0);
 
                 const bunchesNeeded = actualStems > 0 ? Math.ceil(stemsNeeded / actualStems) : 0;
@@ -645,6 +739,13 @@ define([
                     productCode: r.item_name || '',
                     description: r.description || '',
                     pkstm: pkstm,
+                    // SOLD (columna de auditoría, "Show audit"): la proyección del
+                    // Prebook para este green — el multiplicador que se aplicó a la cascada
+                    // del BOM para llegar a stemsNeeded (ver fase 5).
+                    soldBunches: projectedQty,
+                    // SUBTOTAL (columna de auditoría, "Show audit"): la cascada del BOM
+                    // antes de multiplicar por soldBunches — subtotal * soldBunches === stemsNeeded.
+                    subtotal: subtotal,
                     stemsNeeded: stemsNeeded,
                     // Desglose por subcomponente (material real) que compone stemsNeeded.
                     components: components,
@@ -670,7 +771,7 @@ define([
             });
 
             log.audit('GREENS.loadBomComponents',
-                `Fase 9 resumen: ${results_gnl.length} greens · sin BOM propia vigente=${itemsNoRevData}`);
+                `Fase 9 resumen: ${results_gnl.length} greens · sin BOM propia vigente=${itemsNoRevData} · sin proyección=${itemsNoProjection}`);
             log.audit('GREENS.loadBomComponents',
                 `Fase 9 columnas >0: STEMS NEEDED=${itemsWithStems} · QUANTITY ONHAND=${itemsWithOnHand} · ` +
                 `PO RECVD=${itemsWithPoReceived} · UNIT PREP COMP=${itemsWithPrep} (de ${results_gnl.length} greens)`);

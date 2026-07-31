@@ -1,12 +1,8 @@
 /**
  * @NApiVersion 2.1
  * @NModuleScope Public
- *
- * Helpers compartidos para los reportes nuevos del Preebook (R1-R4).
- * Esta librería NO se invoca como Script; se requiere desde otras librerías de reporte y
- * desde el Suitelet shell. Mantener acá toda lógica reusable: lookups de inventario, POs,
- * BOM, conversiones UOM y wrapper de render PDF.
  */
+// Helpers compartidos (BOM, inventario, POs, UOM, render PDF) para las libs de reporte R1-R4.
 define([
     'N/search',
     'N/record',
@@ -15,22 +11,9 @@ define([
     'N/format'
 ], (search, record, render, log, format) => {
 
-    // ----------------------------------------------------------------------
-    // BOM — Assemblies (item.bom default revision)
-    // ----------------------------------------------------------------------
+    // BOM — componentes del BOM default de un assembly.
 
-    /**
-     * Devuelve, por cada assembly item, su lista de componentes del BOM marcado como default.
-     *
-     * Estrategia (NetSuite nativo):
-     *   - Buscar tipo `bomrevision` joineado con `billofmaterials` (assembly + isdefault)
-     *     y con `component` para obtener cada raw material y su qty.
-     *   - Si un assembly tiene varias revisions del BOM default, conservamos la más reciente
-     *     por effective date.
-     *
-     * @param {Array<string|number>} assemblyItemIds
-     * @returns {Object} map { assemblyItemId: [{ rawId, qty, unitsType }, ...] }
-     */
+    // Devuelve, por assembly item, sus componentes del BOM marcado default.
     const loadAssemblyBoms = (assemblyItemIds) => {
         const ids = Array.from(new Set((assemblyItemIds || []).filter(Boolean).map(String)));
         if (!ids.length) return {};
@@ -51,9 +34,7 @@ define([
             columns: [assemblyCol, rawCol, qtyCol, uomCol, effCol]
         });
 
-        // Como ordenamos por effectivestartdate DESC, la primera ocurrencia de
-        // (assembly, raw) corresponde a la revisión más reciente — la conservamos
-        // y descartamos duplicados de revisiones anteriores.
+        // Ordenado DESC por fecha: la primera ocurrencia (assembly, raw) es la revisión más reciente.
         const result = {};
         const seen = {};   // `${assemblyId}|${rawId}` -> true
         const paged = compSearch.runPaged({ pageSize: 1000 });
@@ -77,14 +58,9 @@ define([
         return result;
     };
 
-    // ----------------------------------------------------------------------
-    // Inventory On Hand (suma todas las locations)
-    // ----------------------------------------------------------------------
+    // Inventario on hand (todas las locations).
 
-    /**
-     * @param {Array<string|number>} itemIds
-     * @returns {Object} { itemId: totalOnHand }
-     */
+    // Suma el on-hand de cada item entre todas las locations.
     const getOnHandAllLocations = (itemIds) => {
         const ids = Array.from(new Set((itemIds || []).filter(Boolean).map(String)));
         if (!ids.length) return {};
@@ -117,23 +93,9 @@ define([
         return map;
     };
 
-    // ----------------------------------------------------------------------
-    // Purchase Orders — RECVD / INBOUND filtrados por custbody_sgp_report_id
-    // ----------------------------------------------------------------------
+    // Purchase Orders — recibido / en tránsito, filtrado por custbody_sgp_report_id.
 
-    /**
-     * Suma cantidades de PO líneas filtradas por:
-     *   - type = PurchOrd
-     *   - mainline = F
-     *   - custbody_sgp_report_id = prebookId
-     *   - item anyof rawItemIds
-     *
-     * Modes:
-     *   'received' -> SUM(quantityreceived)
-     *   'inbound'  -> SUM(quantity - NVL(quantityreceived,0))
-     *
-     * @returns {Object} { rawItemId: qty }
-     */
+    // Suma cantidad recibida o en tránsito de PO lines de este Prebook.
     const getPoQty = (rawItemIds, prebookId, mode) => {
         const ids = Array.from(new Set((rawItemIds || []).filter(Boolean).map(String)));
         if (!ids.length || !prebookId) return {};
@@ -182,31 +144,14 @@ define([
         return map;
     };
 
-    // ----------------------------------------------------------------------
-    // UOM conversions — heurística Stem / Bunch / Case
-    // ----------------------------------------------------------------------
+    // UOM conversions — heurística Stem / Bunch / Case.
 
-    /**
-     * Para una lista de items raw, determina:
-     *   - stemsPerBunch: stems por unidad "bunch" (regex/heurística sobre uomname)
-     *   - bunchesPerCase: bunches por unidad "case"
-     *
-     * Estrategia: para cada item leemos sus units (`unitsofmeasure` sublist del unitstype).
-     * Cada renglón tiene { unitname, conversionrate } donde conversionrate está respecto a la baseunit.
-     *
-     * Buscamos por patrón (case-insensitive) en `unitname`:
-     *   - "stem" o "stm"     -> unidad stem
-     *   - "bunch" o "bch" o "bnch" -> unidad bunch
-     *   - "case" o "cs" o "ctn" o "carton" o "box" -> unidad case
-     *
-     * @param {Array<string|number>} rawItemIds
-     * @returns {Object} { itemId: { stemsPerBunch, bunchesPerCase, base, bunchPack } }
-     */
+    // Detecta stemsPerBunch y bunchesPerCase de cada item vía su unitstype.
     const getUomConversions = (rawItemIds) => {
         const ids = Array.from(new Set((rawItemIds || []).filter(Boolean).map(String)));
         if (!ids.length) return {};
 
-        // 1. Para cada item, obtener su unitstype e info adicional
+        // 1. Para cada item, obtener su unitstype e info adicional.
         const itemUomSearch = search.create({
             type: search.Type.ITEM,
             filters: [['internalid', 'anyof', ids]],
@@ -231,8 +176,7 @@ define([
             return true;
         });
 
-        // 2. Cargar todos los unitstype involucrados con sus uom rows
-        // El record 'unitstype' tiene la sublist 'uom' con campos: pluralname/unitname/conversionrate/baseunit/internalid
+        // 2. Cargar cada unitstype involucrado con sus filas de uom (unitname/conversionrate/baseunit).
         const uomTypeMap = {};   // uomTypeId -> { rows: [{unitId, name, conversionrate, isBase}] }
         Array.from(uomTypeIds).forEach((utid) => {
             try {
@@ -255,7 +199,7 @@ define([
             }
         });
 
-        // 3. Heurística para identificar stem / bunch / case por nombre
+        // 3. Heurística para identificar stem / bunch / case por nombre.
         const matchUnit = (rows, patterns) => {
             const lowerPats = patterns.map((p) => p.toLowerCase());
             return rows.find((row) => {
@@ -268,7 +212,7 @@ define([
         const BUNCH_PATTERNS = ['bunch', 'bnch', 'bch'];
         const CASE_PATTERNS = ['case', 'carton', 'ctn', 'box', 'pack'];
 
-        // 4. Por cada item resolver stemsPerBunch y bunchesPerCase
+        // 4. Por cada item, resolver stemsPerBunch y bunchesPerCase.
         const out = {};
         Object.keys(itemMeta).forEach((itemId) => {
             const meta = itemMeta[itemId];
@@ -284,12 +228,7 @@ define([
                 const bunch = matchUnit(uomEntry.rows, BUNCH_PATTERNS);
                 const cs = matchUnit(uomEntry.rows, CASE_PATTERNS);
 
-                // conversionrate = unidades base por 1 unidad de este renglón
-                // Si base es Stem: bunch.conversionrate = stems por bunch
-                // Si base es Bunch: stem.conversionrate = bunches por stem (= 1/stemsPerBunch)
-                // Para robustez, calculamos relativo:
-                //   stemsPerBunch = bunch.cr / stem.cr  (si ambos existen)
-                //   bunchesPerCase = case.cr / bunch.cr (si ambos existen)
+                // conversionrate relativo: stemsPerBunch = bunch.cr / stem.cr; bunchesPerCase = case.cr / bunch.cr.
                 if (stem && bunch && stem.conversionrate > 0) {
                     result.stemsPerBunch = bunch.conversionrate / stem.conversionrate;
                 }
@@ -304,7 +243,7 @@ define([
                 };
             }
 
-            // Saneo: nunca dividir por 0
+            // Saneo: nunca dividir por 0.
             if (!result.stemsPerBunch || result.stemsPerBunch <= 0) result.stemsPerBunch = 1;
             if (!result.bunchesPerCase || result.bunchesPerCase <= 0) result.bunchesPerCase = Number(meta.packing) || 1;
 
@@ -314,18 +253,9 @@ define([
         return out;
     };
 
-    // ----------------------------------------------------------------------
-    // Render PDF (wrapper consistente con el patrón del Suitelet 3856)
-    // ----------------------------------------------------------------------
+    // Render PDF — wrapper de N/render consistente con el patrón del Suitelet 3856.
 
-    /**
-     * @param {Object} opts
-     * @param {number|string} opts.templateId - ID del Advanced PDF Template
-     * @param {string|number} opts.prebookId  - ID del Preebook (se carga el record para el header)
-     * @param {Object} opts.data              - { report: [...rows], action: 'R1', ... }
-     * @param {string} opts.filename
-     * @returns {File}
-     */
+    // Renderiza un Advanced PDF Template con el record del Prebook + datos JSON.
     const renderPdf = (opts) => {
         const renderer = render.create();
         renderer.setTemplateById(opts.templateId);
@@ -347,9 +277,7 @@ define([
         return pdfFile;
     };
 
-    // ----------------------------------------------------------------------
-    // Helpers misc
-    // ----------------------------------------------------------------------
+    // Helpers varios.
 
     const escapeXml = (s) => String(s == null ? '' : s)
         .replace(/&/g, '&amp;')
